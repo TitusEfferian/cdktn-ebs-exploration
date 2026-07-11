@@ -1,5 +1,5 @@
 import { Construct } from "constructs";
-import { App, TerraformStack, TerraformOutput } from "cdktn";
+import { App, TerraformStack, TerraformOutput, Fn } from "cdktn";
 
 import { AwsProvider } from "@cdktn/provider-aws/lib/provider";
 import { Vpc } from "./.gen/modules/vpc";
@@ -13,13 +13,16 @@ class MyStack extends TerraformStack {
     });
 
     const azs = ["ap-northeast-1a", "ap-northeast-1c", "ap-northeast-1d"];
+    const vpcCidr = "10.0.0.0/16";
 
     const vpc = new Vpc(this, "vpc", {
       name: "ebs-test-vpc",
-      cidr: "10.0.0.0/16",
+      cidr: vpcCidr,
       azs,
-      privateSubnets: ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"],
-      publicSubnets: ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"],
+      // /24 subnets derived from the VPC /16, one per AZ. cidrsubnet(prefix, 8, n)
+      // sets the third octet to n: private => 10.0.1-3.0/24, public => 10.0.101-103.0/24.
+      privateSubnets: azs.map((_, i) => Fn.cidrsubnet(vpcCidr, 8, i + 1)),
+      publicSubnets: azs.map((_, i) => Fn.cidrsubnet(vpcCidr, 8, i + 101)),
       enableNatGateway: true,
       singleNatGateway: true,
       createIgw: true,
