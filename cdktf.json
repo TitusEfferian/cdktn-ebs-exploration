@@ -1,0 +1,16 @@
+{
+  "language": "typescript",
+  "app": "npx ts-node main.ts",
+  "projectId": "01661679-c3ff-47e8-8e02-1b6c069e76e0",
+  "sendCrashReports": "true",
+  "targetVersions": {
+    "terraform": ">=1.5.7",
+    "opentofu": ">=1.6.0"
+  },
+  "terraformProviders": [],
+  "terraformModules": [],
+  "context": {
+    "failOnConstructsOutsideOfStacks": "true",
+    "validateFunctionVersions": "true"
+  }
+}
