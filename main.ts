@@ -145,12 +145,6 @@ class MyStack extends TerraformStack {
       minSize: 1,
       maxSize: 1,
       desiredCapacity: 1,
-      // PRIVATE subnet: routes 0.0.0.0/0 -> NAT gateway, so the instance gets
-      // outbound internet (ECS agent registration, image pull, ssmmessages, and
-      // the EC2 API for EBS self-attach) WITHOUT a public IP. A public subnet
-      // here would need map_public_ip_on_launch / an ENI public IP, which this
-      // VPC's public subnets do not set. Same AZ (index 0 = ap-northeast-1a) as
-      // the EBS volume, so attach still works.
       vpcZoneIdentifier: [Fn.element(vpc.privateSubnetsOutput, 0)],
       protectFromScaleIn: true, // required by managed_termination_protection = ENABLED (cluster below)
       // instance role: ECS agent + SSM core + EBS self-attach
