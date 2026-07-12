@@ -28,6 +28,11 @@
       "name": "ecs_service",
       "source": "terraform-aws-modules/ecs/aws//modules/service",
       "version": "7.5"
+    },
+    {
+      "name": "iam_policy",
+      "source": "terraform-aws-modules/iam/aws//modules/iam-policy",
+      "version": "6.4"
     }
   ],
   "context": {

@@ -1,6 +1,6 @@
 import { Construct } from "constructs";
 import { EbsVolume } from "@cdktn/provider-aws/lib/ebs-volume";
-import { IamPolicy } from "@cdktn/provider-aws/lib/iam-policy";
+import { IamPolicy as IamPolicyModule } from "../.gen/modules/iam_policy";
 
 export interface StorageProps {
   // Volume AZ — must match the ASG's subnet AZ (typically azs[0]).
@@ -31,7 +31,7 @@ export class Storage extends Construct {
 
     // Policy letting the instance self-attach the volume (fed to the ASG role).
     // Describe* cannot be resource-scoped; Attach/Detach on "*" is fine for a demo.
-    const ebsPolicy = new IamPolicy(this, "ebs_attach_policy", {
+    const ebsPolicy = new IamPolicyModule(this, "ebs_attach_policy", {
       name: `${props.clusterName}-ebs-self-attach`,
       policy: JSON.stringify({
         Version: "2012-10-17",
@@ -54,6 +54,6 @@ export class Storage extends Construct {
     });
 
     this.volumeId = ebsVolume.id;
-    this.ebsPolicyArn = ebsPolicy.arn;
+    this.ebsPolicyArn = ebsPolicy.arnOutput;
   }
 }
