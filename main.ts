@@ -160,13 +160,6 @@ class MyStack extends TerraformStack {
       tags: commonTags,
     });
 
-    // ECS cluster + EC2 capacity provider backed by the ASG. Settings mirror a
-    // known-good reference: managed_termination_protection ENABLED (+ ASG
-    // protect_from_scale_in = true), managed draining, and a bounded scaling step,
-    // which keeps tasks from wedging in PROVISIONING. Note: scale-in protection
-    // does NOT block a manual `aws ec2 terminate-instances`, so the persistence
-    // demo still works. capacityProviders / defaultCapacityProviderStrategy are
-    // `any`-typed module inputs -> nested keys are emitted verbatim (snake_case).
     const cluster = new EcsCluster(this, "cluster", {
       name: clusterName,
       capacityProviders: {
