@@ -123,20 +123,14 @@ class MyStack extends TerraformStack {
       tags: commonTags,
     });
 
-    // user-data: read the script, substitute the synth-time constants, then
-    // base64-encode in Node. Encoding here (rather than via Fn.base64encode)
-    // keeps Terraform from trying to interpret the script's bash ${...} as HCL
-    // interpolations, and sidesteps the double-quote validation on Fn args.
     const userDataScript = fs
       .readFileSync(path.join(__dirname, "scripts", "user-data.sh"), "utf8")
       .replace(/<VOLUME_TAG>/g, volumeName)
       .replace(/<CLUSTER_NAME>/g, clusterName);
     const userDataB64 = Buffer.from(userDataScript, "utf8").toString("base64");
 
-    // ASG + launch template + instance profile (terraform-aws-modules/autoscaling).
     const asg = new Autoscaling(this, "asg", {
       name: clusterName,
-      // launch template
       imageId: ami.value,
       instanceType: "t4g.small",
       securityGroups: [instanceSg.id],
