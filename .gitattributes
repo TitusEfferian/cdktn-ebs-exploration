@@ -1,0 +1,4 @@
+# Keep shell scripts LF-only. scripts/user-data.sh is read at synth time and
+# base64-encoded into EC2 user_data; CRLF here (this repo has core.autocrlf=true)
+# would corrupt the shebang and break the script on the Linux instance.
+*.sh text eol=lf
