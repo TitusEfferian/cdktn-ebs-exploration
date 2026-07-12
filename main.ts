@@ -51,13 +51,6 @@ class MyStack extends TerraformStack {
     new TerraformOutput(this, "igw_id", { value: vpc.igwIdOutput });
     new TerraformOutput(this, "azs", { value: vpc.azsOutput });
 
-    // =====================================================================
-    // ECS-on-EC2 + standalone-EBS persistence demo
-    // =====================================================================
-    // Everything AZ-scoped is pinned to the first VPC AZ (ap-northeast-1a):
-    // the ASG launches into privateSubnets[0] (NAT egress) and the EBS volume lives in
-    // azs[0], so a replacement instance lands in the same AZ and re-attaches
-    // the same volume. See scripts/user-data.sh + README-ebs-demo.md.
     const clusterName = "ecs-ebs-demo";
     const serviceName = "app";
     const volumeName = "ecs-ebs-persist"; // Name tag; user-data discovers the volume by this
