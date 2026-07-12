@@ -186,19 +186,11 @@ class MyStack extends TerraformStack {
       tags: commonTags,
     });
 
-    // ECS service: busybox task, bridge networking, host bind-mount of the EBS
-    // mount point into /data, Exec enabled. When enableExecuteCommand is true
-    // the module automatically grants the TASKS role the ssmmessages:* actions
-    // that execute-command requires, so no extra task role is needed here.
     const service = new EcsService(this, "service", {
-      // Ensure the cluster (incl. its capacity-provider association) and the ASG
-      // exist before the service places tasks.
       dependsOn: [cluster, asg],
       name: serviceName,
       clusterArn: cluster.arnOutput,
       requiresCompatibilities: ["EC2"],
-      // EC2 placement via the capacity provider (matches the reference repo). Do
-      // NOT also set launchType — capacity_provider_strategy is mutually exclusive.
       capacityProviderStrategy: {
         [capacityProviderName]: {
           capacity_provider: capacityProviderName,
@@ -219,22 +211,14 @@ class MyStack extends TerraformStack {
         operating_system_family: "LINUX",
       },
       enableExecuteCommand: true,
-      // Single task on a single instance: 0% min-healthy during deploys + a
-      // circuit breaker (matches the reference) so placement isn't blocked and a
-      // bad deploy rolls back.
       deploymentMinimumHealthyPercent: 0,
       deploymentMaximumPercent: 100,
       deploymentCircuitBreaker: { enable: true, rollback: true },
-      // host bind-mount: /mnt/ebs (host, = EBS mount point) -> /data (container).
-      // Volume name defaults to the map key "data".
       volume: {
         data: {
           host_path: "/mnt/ebs",
         },
       },
-      // container_definitions mirror the AWS container-definition document: the
-      // ECS fields are camelCase (mountPoints/sourceVolume/linuxParameters/...);
-      // only the module-specific toggles are snake_case.
       containerDefinitions: {
         app: {
           image: "busybox:latest",
