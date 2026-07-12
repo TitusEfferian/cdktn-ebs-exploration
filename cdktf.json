@@ -13,6 +13,21 @@
       "name": "vpc",
       "source": "terraform-aws-modules/vpc/aws",
       "version": "6.6"
+    },
+    {
+      "name": "autoscaling",
+      "source": "terraform-aws-modules/autoscaling/aws",
+      "version": "9.2"
+    },
+    {
+      "name": "ecs_cluster",
+      "source": "terraform-aws-modules/ecs/aws//modules/cluster",
+      "version": "7.5"
+    },
+    {
+      "name": "ecs_service",
+      "source": "terraform-aws-modules/ecs/aws//modules/service",
+      "version": "7.5"
     }
   ],
   "context": {
