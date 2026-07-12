@@ -55,14 +55,13 @@ class MyStack extends TerraformStack {
     // ECS-on-EC2 + standalone-EBS persistence demo
     // =====================================================================
     // Everything AZ-scoped is pinned to the first VPC AZ (ap-northeast-1a):
-    // the ASG launches into publicSubnets[0] and the EBS volume lives in
+    // the ASG launches into privateSubnets[0] (NAT egress) and the EBS volume lives in
     // azs[0], so a replacement instance lands in the same AZ and re-attaches
     // the same volume. See scripts/user-data.sh + README-ebs-demo.md.
     const clusterName = "ecs-ebs-demo";
     const serviceName = "app";
     const volumeName = "ecs-ebs-persist"; // Name tag; user-data discovers the volume by this
-    // NOTE: capacity provider names may NOT be prefixed with "aws", "ecs", or
-    // "fargate" (AWS restriction), so this is NOT derived from clusterName.
+    // Capacity provider name — AWS forbids aws/ecs/fargate prefixes.
     const capacityProviderName = "ebs-demo-ec2";
     const commonTags = { Environment: "test", ManagedBy: "cdktn" };
 
@@ -146,11 +145,14 @@ class MyStack extends TerraformStack {
       minSize: 1,
       maxSize: 1,
       desiredCapacity: 1,
-      vpcZoneIdentifier: [Fn.element(vpc.publicSubnetsOutput, 0)],
-      protectFromScaleIn: false,
-      // the capacity provider's managed_scaling drives desired capacity; don't
-      // let Terraform revert it on subsequent plans.
-      ignoreDesiredCapacityChanges: true,
+      // PRIVATE subnet: routes 0.0.0.0/0 -> NAT gateway, so the instance gets
+      // outbound internet (ECS agent registration, image pull, ssmmessages, and
+      // the EC2 API for EBS self-attach) WITHOUT a public IP. A public subnet
+      // here would need map_public_ip_on_launch / an ENI public IP, which this
+      // VPC's public subnets do not set. Same AZ (index 0 = ap-northeast-1a) as
+      // the EBS volume, so attach still works.
+      vpcZoneIdentifier: [Fn.element(vpc.privateSubnetsOutput, 0)],
+      protectFromScaleIn: true, // required by managed_termination_protection = ENABLED (cluster below)
       // instance role: ECS agent + SSM core + EBS self-attach
       createIamInstanceProfile: true,
       iamRoleName: `${clusterName}-instance`,
@@ -159,32 +161,35 @@ class MyStack extends TerraformStack {
         ssm: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
         ebs: ebsPolicy.arn,
       },
-      // ECS capacity-provider association expects this tag on ASG instances
+      // the capacity-provider association expects this tag on ASG instances
       autoscalingGroupTags: { AmazonECSManaged: "true" },
       tags: commonTags,
     });
 
-    // ECS cluster + EC2 capacity provider backed by the ASG above.
-    // capacityProviders / defaultCapacityProviderStrategy are `any`-typed module
-    // inputs, so their nested keys are emitted verbatim => Terraform snake_case.
-    // The capacity provider's name defaults to its map key (capacityProviderName).
+    // ECS cluster + EC2 capacity provider backed by the ASG. Settings mirror a
+    // known-good reference: managed_termination_protection ENABLED (+ ASG
+    // protect_from_scale_in = true), managed draining, and a bounded scaling step,
+    // which keeps tasks from wedging in PROVISIONING. Note: scale-in protection
+    // does NOT block a manual `aws ec2 terminate-instances`, so the persistence
+    // demo still works. capacityProviders / defaultCapacityProviderStrategy are
+    // `any`-typed module inputs -> nested keys are emitted verbatim (snake_case).
     const cluster = new EcsCluster(this, "cluster", {
       name: clusterName,
       capacityProviders: {
         [capacityProviderName]: {
           auto_scaling_group_provider: {
             auto_scaling_group_arn: asg.autoscalingGroupArnOutput,
-            // DISABLED so the demo can terminate the instance directly; if this
-            // were ENABLED the ASG would need protect_from_scale_in = true.
-            managed_termination_protection: "DISABLED",
+            managed_draining: "ENABLED",
+            managed_termination_protection: "ENABLED",
             managed_scaling: {
               status: "ENABLED",
               target_capacity: 100,
+              minimum_scaling_step_size: 1,
+              maximum_scaling_step_size: 1,
             },
           },
         },
       },
-      // Cluster default strategy references the provider above by name (= key).
       defaultCapacityProviderStrategy: {
         [capacityProviderName]: {
           weight: 1,
@@ -199,15 +204,14 @@ class MyStack extends TerraformStack {
     // the module automatically grants the TASKS role the ssmmessages:* actions
     // that execute-command requires, so no extra task role is needed here.
     const service = new EcsService(this, "service", {
-      // Wait for the whole cluster module (incl. the capacity-provider
-      // association) before placing tasks. clusterArn alone only links the
-      // cluster resource, not the aws_ecs_cluster_capacity_providers association.
-      dependsOn: [cluster],
+      // Ensure the cluster (incl. its capacity-provider association) and the ASG
+      // exist before the service places tasks.
+      dependsOn: [cluster, asg],
       name: serviceName,
       clusterArn: cluster.arnOutput,
       requiresCompatibilities: ["EC2"],
-      // EC2 placement via the capacity provider (do NOT also set launchType).
-      // `capacity_provider` is a required field on each strategy entry.
+      // EC2 placement via the capacity provider (matches the reference repo). Do
+      // NOT also set launchType — capacity_provider_strategy is mutually exclusive.
       capacityProviderStrategy: {
         [capacityProviderName]: {
           capacity_provider: capacityProviderName,
@@ -219,7 +223,21 @@ class MyStack extends TerraformStack {
       createSecurityGroup: false, // bridge mode => no task ENI/SG
       cpu: 256,
       memory: 512,
+      // Match the arm64 (Graviton t4g.small) instance. The module defaults
+      // runtime_platform to X86_64, which makes the task unplaceable on an arm64
+      // host — it sits in PROVISIONING forever. `any`-typed input => nested keys
+      // are emitted verbatim in Terraform snake_case.
+      runtimePlatform: {
+        cpu_architecture: "ARM64",
+        operating_system_family: "LINUX",
+      },
       enableExecuteCommand: true,
+      // Single task on a single instance: 0% min-healthy during deploys + a
+      // circuit breaker (matches the reference) so placement isn't blocked and a
+      // bad deploy rolls back.
+      deploymentMinimumHealthyPercent: 0,
+      deploymentMaximumPercent: 100,
+      deploymentCircuitBreaker: { enable: true, rollback: true },
       // host bind-mount: /mnt/ebs (host, = EBS mount point) -> /data (container).
       // Volume name defaults to the map key "data".
       volume: {

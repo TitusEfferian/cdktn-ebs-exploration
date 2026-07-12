@@ -8,7 +8,7 @@ EBS volume**. The point of the demo is to prove that data written into the conta
 
 - 1 ECS cluster with a single **EC2 capacity provider** wired to an Auto Scaling Group.
 - 1 EC2 instance (`t4g.small`, arm64, ECS-optimized AL2023) launched by the ASG
-  (`min = max = desired = 1`) into **one public subnet** (`ap-northeast-1a`).
+  (`min = max = desired = 1`) into **one private subnet** (`ap-northeast-1a`, egress via NAT).
 - 1 standalone **EBS volume** (`gp3`, 5 GiB, encrypted) tagged `Name=ecs-ebs-persist`,
   created in the **same AZ** as the subnet. It is **not** attached via Terraform — the
   instance's user-data finds it by tag and attaches/mounts it at `/mnt/ebs`.
