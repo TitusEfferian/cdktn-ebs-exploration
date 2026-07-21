@@ -11,14 +11,42 @@ EBS volume**. The point of the demo is to prove that data written into the conta
   (`min = max = desired = 1`) into **one private subnet** (`ap-northeast-1a`, egress via NAT).
 - 1 standalone **EBS volume** (`gp3`, 5 GiB, encrypted) tagged `Name=ecs-ebs-persist`,
   created in the **same AZ** as the subnet. It is **not** attached via Terraform — the
-  instance's user-data finds it by tag and attaches/mounts it at `/mnt/ebs`.
+  instance's boot program finds it by tag and attaches/mounts it at `/mnt/ebs`.
 - 1 ECS service running a **busybox** task (bridge networking) with a host bind-mount
   from `/mnt/ebs` (host) into `/data` (container). Exec is enabled.
+- 1 private **S3 bucket** that delivers the bundled boot program to the instance (see
+  **How the boot program works** below).
 
-The linchpin is `scripts/user-data.sh`: it discovers the volume by tag **in the current
-AZ**, attaches it, resolves the real Nitro device by volume-id, and formats it **only if
-empty** (`blkid` guard). On a replacement instance the filesystem already exists, so it is
-mounted without reformatting and the data is preserved.
+The linchpin is the boot program in `scripts/ebs-bootstrap/` (TypeScript, AWS SDK v3): it
+discovers the volume by tag **in the current AZ**, attaches it, resolves the real Nitro
+device by volume-id, and formats it **only if empty** (`blkid`/`file` guard). On a
+replacement instance the filesystem already exists, so it is mounted without reformatting
+and the data is preserved.
+
+## How the boot program works
+
+The instance's boot logic is a TypeScript/Node.js program
+(`scripts/ebs-bootstrap/index.ts`, AWS SDK v3), not a shell script. At `cdktn synth` the app
+bundles it with **esbuild** into a single minified CJS file and ships it as a
+`TerraformAsset` uploaded to the private S3 bucket (the bundle is ~1.4 MB — far over the
+16 KB EC2 user-data limit). The S3 object key embeds the bundle's content hash, so a code
+change produces a new key, a new launch-template version, and thus new code on the next
+instance.
+
+EC2 user-data is now only `scripts/bootstrap.sh` (~25 lines): it installs `nodejs22`,
+`aws s3 cp`s the bundle to `/opt/ebs-bootstrap.cjs` (using the instance role's
+`s3:GetObject`), and runs it. Configuration passes through two environment variables the
+shim exports: `VOLUME_TAG` (the volume's `Name` tag) and `CLUSTER_NAME` (the ECS cluster to
+join). The program writes `ECS_CLUSTER` to `/etc/ecs/ecs.config` first, then attaches and
+mounts the volume. It runs **once per instance** (plain user-data): a normal reboot does not
+re-run it (fstab remounts the volume by UUID with `nofail`), and an ASG replacement is a
+fresh first boot.
+
+**KMS note:** the EBS volume is encrypted with the default `aws/ebs` managed key, which the
+instance role can use to attach without extra grants. If you switch the volume to a
+**customer-managed** KMS key, the instance role also needs `kms:CreateGrant`, `kms:Decrypt`,
+`kms:DescribeKey`, `kms:GenerateDataKeyWithoutPlaintext`, and `kms:ReEncrypt*` on that key,
+or the attach/mount will fail.
 
 ## Prerequisites
 
@@ -70,7 +98,7 @@ aws ec2 terminate-instances --instance-ids <instanceId> --region ap-northeast-1
 aws autoscaling describe-scaling-activities --auto-scaling-group-name <asg_name> \
   --region ap-northeast-1
 # (optional) tail the replacement's user-data log via SSM Session Manager:
-#   cat /var/log/user-data.log   -> "filesystem exists ... NOT formatting (data preserved)"
+#   cat /var/log/user-data.log   -> "existing filesystem on ... - preserving data (no mkfs)"
 
 # ---- exec into the NEW task and prove persistence -----------------------
 aws ecs list-tasks --cluster <cluster_name> --region ap-northeast-1   # new taskId
@@ -86,6 +114,10 @@ cdktn destroy
 
 - The `hello_world.txt` file is **not** created by this stack. Writing it by hand during
   the exec session is the whole point of the demo.
-- `managed_termination_protection` on the capacity provider is **DISABLED** so you can
-  terminate the instance directly with `aws ec2 terminate-instances`.
-- The volume has no `prevent_destroy`, so `cdktn destroy` cleans everything up.
+- `managed_termination_protection` on the capacity provider is **ENABLED** (with ASG
+  scale-in protection). That is what lets ECS drain tasks before an instance is removed. It
+  does **not** block the demo: `aws ec2 terminate-instances` terminates the instance
+  directly (scale-in protection only blocks *ASG-initiated* scale-in), and the ASG then
+  launches a fresh replacement.
+- The volume has no `prevent_destroy`, so `cdktn destroy` cleans everything up (the boot
+  bucket uses `force_destroy`, so it is emptied and removed too).
