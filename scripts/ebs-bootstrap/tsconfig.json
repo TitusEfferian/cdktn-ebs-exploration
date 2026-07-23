@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "noEmit": true,
+    "declaration": false,
+    "incremental": false,
+    // Explicit: the TS 6/7 line (incl. the VS Code nightly extension) no longer
+    // auto-includes node_modules/@types, so name the packages this project needs.
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"],
+  // Override the root's `exclude` (which lists scripts/ebs-bootstrap for its own
+  // CommonJS build); inherited, it would resolve to this directory and leave no inputs.
+  "exclude": ["node_modules", "dist"]
+}

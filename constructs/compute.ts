@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Construct } from "constructs";
-import { ITerraformDependable } from "cdktn";
+import { Fn, ITerraformDependable } from "cdktn";
 import { DataAwsSsmParameter } from "@cdktn/provider-aws/lib/data-aws-ssm-parameter";
 import { Autoscaling } from "../.gen/modules/autoscaling";
 import { EcsCluster } from "../.gen/modules/ecs_cluster";
@@ -13,6 +13,13 @@ export interface ComputeProps {
   readonly clusterName: string;
   readonly capacityProviderName: string;
   readonly volumeName: string;
+  // Region for the user-data `aws s3 cp` of the boot bundle.
+  readonly region: string;
+  // Boot-bundle delivery (from Storage): the S3 location user-data fetches from,
+  // and the object the ASG must wait for before the instance boots.
+  readonly bootstrapBucketName: string;
+  readonly bootstrapObjectKey: string;
+  readonly bootstrapObject: ITerraformDependable;
   readonly tags: Record<string, string>;
 }
 
@@ -36,11 +43,34 @@ export class Compute extends Construct {
       name: "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id",
     });
 
-    const userDataScript = fs
-      .readFileSync(path.join(__dirname, "..", "scripts", "user-data.sh"), "utf8")
+    // The tiny bash bootstrap: install Node, fetch the bundle from S3, run it.
+    // The generated bucket name is a Terraform token, so base64 must happen in
+    // Terraform — a Buffer at synth would encode the unresolved token. But the
+    // script also contains literal double quotes and bash ${...}, which
+    // Fn.base64encode rejects on a plain string. Fn.join + Fn.rawString keep the
+    // literal script exact (quotes and all) while splicing the bucket name in as
+    // a real reference; rawString escapes bash ${VAR} to $${VAR} so Terraform
+    // leaves it for the shell.
+    const scriptTemplate = fs
+      .readFileSync(path.join(__dirname, "..", "scripts", "bootstrap.sh"), "utf8")
+      .replace(/<BUNDLE_KEY>/g, props.bootstrapObjectKey)
+      .replace(/<REGION>/g, props.region)
       .replace(/<VOLUME_TAG>/g, props.volumeName)
       .replace(/<CLUSTER_NAME>/g, props.clusterName);
-    const userDataB64 = Buffer.from(userDataScript, "utf8").toString("base64");
+    // <BUNDLE_BUCKET> must appear exactly once; splice the bucket-name token
+    // between the surrounding literal halves. (If bootstrap.sh ever gains a literal
+    // Terraform `%{` directive — e.g. from `printf`/`curl -w` — pre-escape it to
+    // `%%{`; cdktn's rawString escapes `${` but not `%{`.)
+    const parts = scriptTemplate.split("<BUNDLE_BUCKET>");
+    if (parts.length !== 2) {
+      throw new Error(
+        `expected exactly one <BUNDLE_BUCKET> marker in bootstrap.sh, found ${parts.length - 1}`,
+      );
+    }
+    const [scriptHead, scriptTail] = parts;
+    const userDataB64 = Fn.base64encode(
+      Fn.join("", [Fn.rawString(scriptHead), props.bootstrapBucketName, Fn.rawString(scriptTail)]),
+    );
 
     const asg = new Autoscaling(this, "asg", {
       name: props.clusterName,
@@ -48,19 +78,21 @@ export class Compute extends Construct {
       instanceType: "t4g.small",
       securityGroups: [props.securityGroupId],
       userData: userDataB64, // module expects base64-encoded user data
+      // Upload the bundle to S3 before the instance boots and fetches it.
+      dependsOn: [props.bootstrapObject],
       // pin to exactly one instance in one subnet (=> one AZ, = the volume's AZ)
       minSize: 1,
       maxSize: 1,
       desiredCapacity: 1,
       vpcZoneIdentifier: [props.subnetId],
       protectFromScaleIn: true, // required by managed_termination_protection = ENABLED (cluster below)
-      // instance role: ECS agent + SSM core + EBS self-attach
+      // instance role: ECS agent + SSM core + EBS self-attach & boot-bundle read
       createIamInstanceProfile: true,
       iamRoleName: `${props.clusterName}-instance`,
       iamRolePolicies: {
         ecs: "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
         ssm: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
-        ebs: props.ebsPolicyArn,
+        ebs: props.ebsPolicyArn, // EBS attach/detach + s3:GetObject on the bundle
       },
       // the capacity-provider association expects this tag on ASG instances
       autoscalingGroupTags: { AmazonECSManaged: "true" },

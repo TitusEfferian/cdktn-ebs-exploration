@@ -7,5 +7,6 @@ cdktf.log
 .gen
 .terraform
 tsconfig.tsbuildinfo
+scripts/ebs-bootstrap/dist
 !jest.config.js
 !setup.js

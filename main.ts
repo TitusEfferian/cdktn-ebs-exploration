@@ -1,14 +1,40 @@
+import * as path from "path";
+import { buildSync } from "esbuild";
 import { Construct } from "constructs";
 import { App, TerraformStack, TerraformOutput, Fn } from "cdktn";
 import { AwsProvider } from "@cdktn/provider-aws/lib/provider";
 import { Network, Storage, Compute, AppService } from "./constructs";
+
+const region = "ap-northeast-1";
+
+// Bundle the on-instance boot program (scripts/ebs-bootstrap) into a single CJS
+// file BEFORE synth, so the TerraformAsset in Storage can read it. cdktn re-runs
+// this app on every synth/deploy/diff, so the bundle is always regenerated in
+// lockstep; it is then delivered to the instance via S3 (too large for the 16 KB
+// user-data limit).
+const bootstrapBundlePath = path.join(
+  __dirname,
+  "scripts",
+  "ebs-bootstrap",
+  "dist",
+  "ebs-bootstrap.cjs",
+);
+buildSync({
+  entryPoints: [path.join(__dirname, "scripts", "ebs-bootstrap", "index.ts")],
+  bundle: true,
+  platform: "node",
+  target: "node20",
+  format: "cjs", // lowest-risk for a boot-critical script (no ESM require shims)
+  minify: true,
+  outfile: bootstrapBundlePath,
+});
 
 class MyStack extends TerraformStack {
   constructor(scope: Construct, id: string) {
     super(scope, id);
 
     new AwsProvider(this, "aws", {
-      region: "ap-northeast-1",
+      region,
     });
 
     const clusterName = "ecs-ebs-demo";
@@ -28,6 +54,7 @@ class MyStack extends TerraformStack {
       availabilityZone: Fn.element(network.azs, 0),
       clusterName,
       volumeName,
+      bootstrapBundlePath,
       tags: commonTags,
     });
 
@@ -39,6 +66,10 @@ class MyStack extends TerraformStack {
       clusterName,
       capacityProviderName,
       volumeName,
+      region,
+      bootstrapBucketName: storage.bootstrapBucketName,
+      bootstrapObjectKey: storage.bootstrapObjectKey,
+      bootstrapObject: storage.bootstrapObject,
       tags: commonTags,
     });
 
@@ -51,7 +82,7 @@ class MyStack extends TerraformStack {
     });
 
     const execHint =
-      `aws ecs execute-command --region ap-northeast-1 --cluster ${clusterName} ` +
+      `aws ecs execute-command --region ${region} --cluster ${clusterName} ` +
       `--container app --interactive --command "/bin/sh" --task <TASK_ID>`;
 
     new TerraformOutput(this, "vpc_id", { value: network.vpcId });
