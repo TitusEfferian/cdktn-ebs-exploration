@@ -7,7 +7,10 @@
     "lib": ["ES2023"],
     "noEmit": true,
     "declaration": false,
-    "incremental": false
+    "incremental": false,
+    // Explicit: the TS 6/7 line (incl. the VS Code nightly extension) no longer
+    // auto-includes node_modules/@types, so name the packages this project needs.
+    "types": ["node"]
   },
   "include": ["**/*.ts"],
   // Override the root's `exclude` (which lists scripts/ebs-bootstrap for its own
