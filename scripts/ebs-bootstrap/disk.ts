@@ -26,7 +26,7 @@ export async function resolveDevice(volumeId: string): Promise<string> {
 
   const start = Date.now();
   const deadline = start + MAX_WAIT_MS;
-  for (;;) {
+  while (true) {
     // 1) Stable by-id symlink -> resolve to the real /dev/nvme?n1.
     try {
       return await realpath(byIdLink);

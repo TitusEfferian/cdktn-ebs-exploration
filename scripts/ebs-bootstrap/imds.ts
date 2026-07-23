@@ -16,7 +16,7 @@ export async function getInstanceIdentity(): Promise<InstanceIdentity> {
   const meta = new MetadataService({});
   const start = Date.now();
   const deadline = start + IMDS_WAIT_MS;
-  for (;;) {
+  while (true) {
     try {
       const instanceId = (await meta.request("/latest/meta-data/instance-id", {})).trim();
       const az = (await meta.request("/latest/meta-data/placement/availability-zone", {})).trim();
