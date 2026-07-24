@@ -22,7 +22,7 @@ export async function discoverVolume(
 ): Promise<DiscoveredVolume> {
   const start = Date.now();
   const deadline = start + MAX_WAIT_MS;
-  for (;;) {
+  while (true) {
     const res = await ec2
       .send(
         new DescribeVolumesCommand({
@@ -71,7 +71,7 @@ async function waitForAttachment(
 ): Promise<void> {
   const start = Date.now();
   const deadline = start + MAX_WAIT_MS;
-  for (;;) {
+  while (true) {
     const res = await ec2
       .send(new DescribeVolumesCommand({ VolumeIds: [volumeId] }))
       .catch((err: unknown) => {
@@ -106,7 +106,7 @@ export async function ensureAttached(
   // Retry loop within the overall budget: a just-terminated previous instance may
   // still be detaching, so AttachVolume can return VolumeInUse / IncorrectState.
   // On those, re-wait for the volume to become available and try again.
-  for (;;) {
+  while (true) {
     const remainingS = Math.max(5, Math.ceil((deadline - Date.now()) / 1000));
     try {
       await waitUntilVolumeAvailable(
