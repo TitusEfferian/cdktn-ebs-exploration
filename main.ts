@@ -55,6 +55,7 @@ class MyStack extends TerraformStack {
       clusterName,
       volumeName,
       bootstrapBundlePath,
+      region,
       tags: commonTags,
     });
 
