@@ -39,10 +39,7 @@ export class Network extends Construct {
       createIgw: true,
       enableDnsHostnames: true,
       enableDnsSupport: true,
-      tags: {
-        Environment: "test",
-        ManagedBy: "cdktn",
-      },
+      tags: props.tags,
     });
 
     // Instance security group: egress-all (outbound to ECS/ECR/ssmmessages),

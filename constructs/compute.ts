@@ -1,10 +1,8 @@
-import * as fs from "fs";
-import * as path from "path";
 import { Construct } from "constructs";
-import { Fn, ITerraformDependable } from "cdktn";
-import { DataAwsSsmParameter } from "@cdktn/provider-aws/lib/data-aws-ssm-parameter";
+import { ITerraformDependable } from "cdktn";
 import { Autoscaling } from "../.gen/modules/autoscaling";
 import { EcsCluster } from "../.gen/modules/ecs_cluster";
+import { buildUserDataB64 } from "./user-data";
 
 export interface ComputeProps {
   readonly subnetId: string;
@@ -13,6 +11,9 @@ export interface ComputeProps {
   readonly clusterName: string;
   readonly capacityProviderName: string;
   readonly volumeName: string;
+  // arm64 ECS-optimized AL2023 AMI id (hoisted lookup in the stack, shared
+  // with the six slot ASGs so one data source serves every launch template).
+  readonly amiId: string;
   // Region for the user-data `aws s3 cp` of the boot bundle.
   readonly region: string;
   // Boot-bundle delivery (from Storage): the S3 location user-data fetches from,
@@ -20,11 +21,15 @@ export interface ComputeProps {
   readonly bootstrapBucketName: string;
   readonly bootstrapObjectKey: string;
   readonly bootstrapObject: ITerraformDependable;
+  // Slot capacity providers (name -> ASG arn) registered on the same cluster,
+  // alongside the busybox demo's provider. The cluster module's
+  // capacityProviders input is a map, so one cluster declares all seven.
+  readonly extraCapacityProviders: Record<string, string>;
   readonly tags: Record<string, string>;
 }
 
-// Compute layer: the ECS-optimized AMI lookup, the single-instance ASG, and the
-// ECS cluster wired to an EC2 capacity provider backed by that ASG.
+// Compute layer: the single-instance ASG for the busybox demo, and the ECS
+// cluster wired to EC2 capacity providers (the demo's plus one per slot).
 export class Compute extends Construct {
   public readonly clusterArn: string;
   public readonly clusterName: string;
@@ -33,48 +38,32 @@ export class Compute extends Construct {
   public readonly asgName: string;
   // Cluster + ASG as ordering handles for resources that must come up after them.
   public readonly dependables: ITerraformDependable[];
+  // Just the cluster module: slot services must order after the capacity-provider
+  // association (they reference providers by NAME string, which carries no
+  // implicit dependency), but not after the busybox ASG.
+  public readonly clusterDependable: ITerraformDependable;
 
   constructor(scope: Construct, id: string, props: ComputeProps) {
     super(scope, id);
 
-    // arm64 ECS-optimized AL2023 AMI (matches the t4g.small Graviton instance).
-    // This SSM param holds the image-id string directly, so .value is the AMI id.
-    const ami = new DataAwsSsmParameter(this, "ecs_ami", {
-      name: "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id",
-    });
-
     // The tiny bash bootstrap: install Node, fetch the bundle from S3, run it.
-    // The generated bucket name is a Terraform token, so base64 must happen in
-    // Terraform — a Buffer at synth would encode the unresolved token. But the
-    // script also contains literal double quotes and bash ${...}, which
-    // Fn.base64encode rejects on a plain string. Fn.join + Fn.rawString keep the
-    // literal script exact (quotes and all) while splicing the bucket name in as
-    // a real reference; rawString escapes bash ${VAR} to $${VAR} so Terraform
-    // leaves it for the shell.
-    const scriptTemplate = fs
-      .readFileSync(path.join(__dirname, "..", "scripts", "bootstrap.sh"), "utf8")
-      .replace(/<BUNDLE_KEY>/g, props.bootstrapObjectKey)
-      .replace(/<REGION>/g, props.region)
-      .replace(/<VOLUME_TAG>/g, props.volumeName)
-      .replace(/<CLUSTER_NAME>/g, props.clusterName);
-    // <BUNDLE_BUCKET> must appear exactly once; splice the bucket-name token
-    // between the surrounding literal halves. (If bootstrap.sh ever gains a literal
-    // Terraform `%{` directive — e.g. from `printf`/`curl -w` — pre-escape it to
-    // `%%{`; cdktn's rawString escapes `${` but not `%{`.)
-    const parts = scriptTemplate.split("<BUNDLE_BUCKET>");
-    if (parts.length !== 2) {
-      throw new Error(
-        `expected exactly one <BUNDLE_BUCKET> marker in bootstrap.sh, found ${parts.length - 1}`,
-      );
-    }
-    const [scriptHead, scriptTail] = parts;
-    const userDataB64 = Fn.base64encode(
-      Fn.join("", [Fn.rawString(scriptHead), props.bootstrapBucketName, Fn.rawString(scriptTail)]),
-    );
+    // Marker replacement + rawString splicing live in ./user-data (shared with
+    // the slot ASGs). The busybox instance runs the same boot program with
+    // slot "app"/role "app": role-dir prep is a no-op for it, and the shared
+    // agent-config lines (task cleanup, IMDS block) are harmless improvements.
+    const userDataB64 = buildUserDataB64({
+      bootstrapBucketName: props.bootstrapBucketName,
+      bootstrapObjectKey: props.bootstrapObjectKey,
+      region: props.region,
+      volumeTag: props.volumeName,
+      clusterName: props.clusterName,
+      slotName: "app",
+      nodeRole: "app",
+    });
 
     const asg = new Autoscaling(this, "asg", {
       name: props.clusterName,
-      imageId: ami.value,
+      imageId: props.amiId,
       instanceType: "t4g.small",
       securityGroups: [props.securityGroupId],
       userData: userDataB64, // module expects base64-encoded user data
@@ -99,23 +88,36 @@ export class Compute extends Construct {
       tags: props.tags,
     });
 
+    // Every capacity provider shares the demo's proven shape: managed scaling
+    // (required by managed termination protection) is inert on min=max=1 groups
+    // — it can never scale a slot to 0 or above 1.
+    const providerFor = (asgArn: string) => ({
+      auto_scaling_group_provider: {
+        auto_scaling_group_arn: asgArn,
+        managed_draining: "ENABLED",
+        managed_termination_protection: "ENABLED",
+        managed_scaling: {
+          status: "ENABLED",
+          target_capacity: 100,
+          minimum_scaling_step_size: 1,
+          maximum_scaling_step_size: 1,
+        },
+      },
+    });
+
     const cluster = new EcsCluster(this, "cluster", {
       name: props.clusterName,
       capacityProviders: {
-        [props.capacityProviderName]: {
-          auto_scaling_group_provider: {
-            auto_scaling_group_arn: asg.autoscalingGroupArnOutput,
-            managed_draining: "ENABLED",
-            managed_termination_protection: "ENABLED",
-            managed_scaling: {
-              status: "ENABLED",
-              target_capacity: 100,
-              minimum_scaling_step_size: 1,
-              maximum_scaling_step_size: 1,
-            },
-          },
-        },
+        [props.capacityProviderName]: providerFor(asg.autoscalingGroupArnOutput),
+        ...Object.fromEntries(
+          Object.entries(props.extraCapacityProviders).map(([name, asgArn]) => [
+            name,
+            providerFor(asgArn),
+          ]),
+        ),
       },
+      // Unchanged from the original demo: ad-hoc RunTask without a strategy
+      // lands on the busybox provider — never on a quorum slot's instance.
       defaultCapacityProviderStrategy: {
         [props.capacityProviderName]: {
           weight: 1,
@@ -131,5 +133,6 @@ export class Compute extends Construct {
     this.asgArn = asg.autoscalingGroupArnOutput;
     this.asgName = asg.autoscalingGroupNameOutput;
     this.dependables = [cluster, asg];
+    this.clusterDependable = cluster;
   }
 }

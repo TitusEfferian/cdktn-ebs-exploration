@@ -27,6 +27,7 @@ export class Storage extends Construct {
   public readonly ebsPolicyArn: string;
   // Boot-bundle delivery, consumed by Compute to build the instance user-data.
   public readonly bootstrapBucketName: string;
+  public readonly bootstrapBucketArn: string;
   public readonly bootstrapObjectKey: string;
   public readonly bootstrapObject: ITerraformDependable;
 
@@ -129,6 +130,7 @@ export class Storage extends Construct {
     this.volumeId = ebsVolume.id;
     this.ebsPolicyArn = ebsPolicy.arnOutput;
     this.bootstrapBucketName = bootstrapBucket.bucket;
+    this.bootstrapBucketArn = bootstrapBucket.arn;
     this.bootstrapObjectKey = bootstrapKey;
     this.bootstrapObject = bootstrapObject;
   }

@@ -4,8 +4,16 @@
 // INVARIANT: this NEVER reformats a device that already carries a filesystem —
 // that is what preserves data across instance replacement in the EBS demo.
 
-import { readFile, mkdir, realpath, readdir } from "node:fs/promises";
-import { DEFAULT_FS_TYPE, FSTAB, INTERVAL_MS, MAX_WAIT_MS, MOUNT_POINT } from "./constants";
+import { readFile, mkdir, realpath, readdir, chown } from "node:fs/promises";
+import {
+  CONTAINER_GID,
+  CONTAINER_UID,
+  DEFAULT_FS_TYPE,
+  FSTAB,
+  INTERVAL_MS,
+  MAX_WAIT_MS,
+  MOUNT_POINT,
+} from "./constants";
 import { atomicWrite, errlog, execFileAsync, execOk, log, runQuiet, sleep, waitBanner } from "./utils";
 
 async function listNvmeDevices(): Promise<string[]> {
@@ -147,4 +155,37 @@ export async function mountAndPermit(): Promise<void> {
   // Sticky bit (1777) rather than 0777: containers share the dir but cannot
   // delete each other's files.
   await execFileAsync("chmod", ["1777", MOUNT_POINT]);
+}
+
+// Per-role bind-mount source directories under the mounted volume. The NiFi
+// image runs as uid 1000 and its entrypoint never chowns bind mounts, so the
+// host must hand ownership over; ZooKeeper's entrypoint chowns for itself, but
+// pre-chowning keeps both roles symmetrical.
+const ROLE_DIRS: Record<string, readonly string[]> = {
+  nifi: ["flowfile", "content", "provenance", "database", "state", "flow"],
+  zookeeper: ["data", "datalog"],
+};
+
+// mkdir + chown each role directory — chown ONLY when the directory was just
+// created: on a re-attached volume the numeric uid/gid persisted in the ext4
+// metadata, and a recursive re-chown of a populated content repository would
+// needlessly stretch boot time.
+export async function prepareRoleDirs(nodeRole: string): Promise<void> {
+  const dirs = ROLE_DIRS[nodeRole];
+  if (dirs === undefined) {
+    log(`no role directories defined for role '${nodeRole}' — skipping`);
+    return;
+  }
+  for (const name of dirs) {
+    const dir = `${MOUNT_POINT}/${nodeRole}/${name}`;
+    // mkdir{recursive} returns the first path it created, undefined when the
+    // directory already fully existed — exactly the "fresh volume?" signal.
+    const created = await mkdir(dir, { recursive: true });
+    if (created !== undefined) {
+      await chown(dir, CONTAINER_UID, CONTAINER_GID);
+      log(`created ${dir} (chown ${CONTAINER_UID}:${CONTAINER_GID})`);
+    } else {
+      log(`${dir} exists — preserving ownership and data`);
+    }
+  }
 }
