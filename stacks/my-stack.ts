@@ -6,7 +6,6 @@ import { Network, Storage, Compute, AppService } from "../constructs";
 const region = "ap-northeast-1";
 
 export interface MyStackProps {
-  // Path to the esbuild bundle of the boot program (produced in main.ts).
   readonly bootstrapBundlePath: string;
 }
 
