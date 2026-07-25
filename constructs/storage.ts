@@ -15,6 +15,8 @@ export interface StorageProps {
   readonly volumeName: string;
   // Path to the esbuild bundle of the boot program (produced in main.ts).
   readonly bootstrapBundlePath: string;
+  // Region for the IAM policy ARNs below (must match the AwsProvider region in main.ts).
+  readonly region: string;
   readonly tags: Record<string, string>;
 }
 
@@ -45,7 +47,6 @@ export class Storage extends Construct {
     // Account id, purely so Attach/Detach below can be scoped to real ARNs instead
     // of "*" (no permission change from adding this — it's a read-only lookup).
     const current = new DataAwsCallerIdentity(this, "current", {});
-    const region = "ap-northeast-1"; // matches the AwsProvider region in main.ts
 
     // Private bucket that delivers the bundled boot program to the instance. The
     // bundle is far larger than the 16 KB user-data limit, so user-data fetches
@@ -93,7 +94,7 @@ export class Storage extends Construct {
           sid: "AttachDetachVolume",
           effect: "Allow",
           actions: ["ec2:AttachVolume", "ec2:DetachVolume"],
-          resources: [`arn:aws:ec2:${region}:${current.accountId}:volume/*`],
+          resources: [`arn:aws:ec2:${props.region}:${current.accountId}:volume/*`],
           condition: [
             {
               test: "StringEquals",
@@ -106,7 +107,7 @@ export class Storage extends Construct {
           sid: "AttachDetachInstance",
           effect: "Allow",
           actions: ["ec2:AttachVolume", "ec2:DetachVolume"],
-          resources: [`arn:aws:ec2:${region}:${current.accountId}:instance/*`],
+          resources: [`arn:aws:ec2:${props.region}:${current.accountId}:instance/*`],
         },
         {
           // Let the instance download the boot bundle. Object-scoped; s3:ListBucket
