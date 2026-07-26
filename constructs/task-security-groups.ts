@@ -99,7 +99,9 @@ export class TaskSecurityGroups extends Construct {
     });
     new VpcSecurityGroupIngressRule(this, "zk_quorum_self", {
       securityGroupId: zkSg.id,
-      description: "quorum (follower -> leader)",
+      // EC2 SG-rule descriptions forbid `<` and `>` (allowed set is
+      // a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*), so no "->" arrows here.
+      description: "quorum (follower to leader)",
       ipProtocol: "tcp",
       fromPort: 2888,
       toPort: 2888,
