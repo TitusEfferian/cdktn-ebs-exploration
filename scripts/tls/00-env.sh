@@ -9,7 +9,19 @@
 #
 # Passwords come from env vars or an interactive prompt - NEVER hardcoded, and
 # never on keytool's argv (keytool reads them via -storepass:env VAR, so the
-# value is invisible to `ps`). DN note: a literal comma inside a DN value must
+# value is invisible to `ps`). The stack consumes this suite's output through
+# SIX placeholder-seeded Secrets Manager secrets (README-nifi-cluster.md has
+# the exact upload commands):
+#   ecs-ebs-demo/nifi/tls/keystore-password    = TLS_NODE_PASS (colon-free!)
+#   ecs-ebs-demo/nifi/tls/truststore-password  = TLS_TRUST_PASS
+#   ecs-ebs-demo/nifi/tls/keystore-nifi-{1,2,3} = base64 of out/nodes/<n>/keystore.p12
+#   ecs-ebs-demo/nifi/tls/truststore           = base64 of out/shared/truststore.p12
+# After populating you can pull a password back here, e.g.:
+#   TLS_NODE_PASS=$(aws secretsmanager get-secret-value \
+#     --secret-id ecs-ebs-demo/nifi/tls/keystore-password \
+#     --query SecretString --output text)
+# TLS_CA_PASS / TLS_ADMIN_PASS have NO AWS copy on purpose (build-machine only).
+# DN note: a literal comma inside a DN value must
 # be written as \\, inside double quotes (collapses to backslash-comma for
 # RFC-2253 escaping) - avoid commas in CN/OU values entirely if you can.
 [ -n "${BASH_VERSION:-}" ] || { echo 'error: these scripts require bash' >&2; return 1 2>/dev/null || exit 1; }
@@ -55,8 +67,9 @@ if [[ $- != *i* ]]; then
 fi
 
 # prompt_secret VARNAME "Prompt text": use the env value if set (validated),
-# else prompt twice. keytool's own minimum is 6 chars; anything parked in S3 is
-# only as strong as this password, so >=16 random chars is the real bar.
+# else prompt twice. keytool's own minimum is 6 chars; a keystore blob parked in
+# Secrets Manager is only as strong as this password, so >=16 random chars is
+# the real bar.
 prompt_secret() {
   local var=$1 prompt=$2 v1 v2
   if [[ -n ${!var:-} ]]; then
@@ -66,7 +79,7 @@ prompt_secret() {
       return 1
     fi
     if [[ ${#v1} -lt 16 ]]; then
-      echo "warning: $var is shorter than 16 chars - fine for a lab, weak for anything parked in S3" >&2
+      echo "warning: $var is shorter than 16 chars - fine for a lab, weak for keystore blobs parked in Secrets Manager" >&2
     fi
     export "$var"
     return 0

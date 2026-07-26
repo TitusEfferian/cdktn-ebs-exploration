@@ -39,22 +39,24 @@ export class TaskSecurityGroups extends Construct {
     });
 
     // --- NiFi ingress ---------------------------------------------------------
+    // (RAW site-to-site 10000 is disabled in the container wrapper and has no
+    // rule here on purpose.)
     new VpcSecurityGroupIngressRule(this, "nifi_web_from_instances", {
       securityGroupId: nifiSg.id,
-      description: "NiFi UI/API via SSM port-forward from slot instances",
+      description: "NiFi HTTPS UI/API via SSM port-forward from slot instances",
       ipProtocol: "tcp",
-      fromPort: 8080,
-      toPort: 8080,
+      fromPort: 8443,
+      toPort: 8443,
       referencedSecurityGroupId: props.instanceSecurityGroupId,
     });
     // Cluster REST request replication travels node-to-node over the WEB port,
     // in addition to the cluster-protocol and load-balance ports.
     new VpcSecurityGroupIngressRule(this, "nifi_web_self", {
       securityGroupId: nifiSg.id,
-      description: "node-to-node REST replication (web port)",
+      description: "node-to-node REST replication (HTTPS web port)",
       ipProtocol: "tcp",
-      fromPort: 8080,
-      toPort: 8080,
+      fromPort: 8443,
+      toPort: 8443,
       referencedSecurityGroupId: nifiSg.id,
     });
     new VpcSecurityGroupIngressRule(this, "nifi_cluster_self", {

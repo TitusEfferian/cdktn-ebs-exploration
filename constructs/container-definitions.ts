@@ -92,56 +92,94 @@ export function containerDefinitions(
 // NiFi 2.x cluster node
 // ---------------------------------------------------------------------------
 
-// The official apache/nifi 2.x image removed its unsecured-HTTP mode: start.sh
-// unconditionally forces nifi.web.https.* and nifi.remote.input.secure=true
-// (which CRASHES an HTTP-only node at startup). NiFi itself fully supports
-// HTTP clustering, so this wrapper patches the three offending start.sh lines,
-// pre-sets the HTTP + persistence + growth-cap properties start.sh never
-// touches, then execs start.sh — keeping all its env handling (cluster/ZK
-// wiring, log tailing, signal traps) and making NiFi PID 1 for direct SIGTERM.
+// NiFi runs HTTPS/AUTH=tls from FIRST BOOT. With AUTH=tls the image's own
+// secure.sh wires nifi.security.* + authorizers.xml from env, and the
+// bootstrap's cert generation + single-user setup are skipped (generation
+// requires blank passwords AND missing store files — ours exist with
+// passwords). The keystores arrive as BASE64 TEXT env vars injected from
+// Secrets Manager (ECS injects secrets as env, never as files), so this
+// wrapper, in order:
+//   1. refuses to start while a *_B64 secret still holds the Terraform
+//      placeholder — loud exit 1, ECS restarts the container until the
+//      operator uploads real base64 via put-secret-value (fail-closed),
+//   2. decodes them to the .p12 paths secure.sh expects (conf/ is a fresh
+//      anonymous volume per task; nothing in the image wipes it afterwards),
+//   3. appends the two MISSING node identities to authorizers.xml — secure.sh
+//      fills only the "...1" slots, and FileAccessPolicyProvider throws at
+//      startup ("Unable to locate node ... to seed policies") when a Node
+//      Identity is not also a user-group-provider user. sed, NOT xmlstarlet:
+//      xmlstarlet re-serializes the empty elements self-closing, which would
+//      break secure.sh's own literal sed patterns,
+//   4. re-points users.xml/authorizations.xml into persisted flow_storage so
+//      UI-added users/policies survive a FULL-cluster restart (a single
+//      replaced node would re-inherit them from the cluster anyway),
+//   5. blanks the RAW site-to-site port default — start.sh would otherwise
+//      set 10000 and NiFi would bind a TLS S2S listener nobody uses,
+//   6. keeps the flow_storage re-point + growth-cap property edits (conf/
+//      must NOT be bind-mounted — a host mount would shadow the image's conf
+//      and leave no nifi.properties at all; the flow lives in flow_storage),
+//   7. execs start.sh — image keeps its env handling, ZK wiring, log tailing
+//      and signal traps; NiFi becomes PID 1 for direct SIGTERM.
 //
-// sed exits 0 on no-match; grep -qF guards make container start FAIL if the
-// upstream image changes these lines instead of silently running with wrong
-// ports. Fail-safe either way: an unpatched image comes up HTTPS:8443, the
-// HTTP health check fails, and the task is replaced loudly — never silently
-// corrupted.
-//
-// Quote layering: this string is JSON-escaped only (no outer shell), so the
-// single quotes inside the start.sh patterns are literal; those sed scripts are
-// wrapped in sh double quotes, the nifi.properties seds (no single quotes) in
-// sh single quotes. No `$`, backticks, double quotes, or backslashes anywhere
-// inside the sed scripts; `|` is the sed delimiter because patterns contain `/`.
-const NIFI_HTTP_WRAPPER = [
-  `grep -qF "prop_replace 'nifi.web.https.port'" /opt/nifi/scripts/start.sh`,
-  `sed -i "s|^prop_replace 'nifi.web.https.port'.*|prop_replace 'nifi.web.https.port' ''|" /opt/nifi/scripts/start.sh`,
-  `grep -qF "prop_replace 'nifi.web.https.host'" /opt/nifi/scripts/start.sh`,
-  `sed -i "s|^prop_replace 'nifi.web.https.host'.*|prop_replace 'nifi.web.https.host' ''|" /opt/nifi/scripts/start.sh`,
-  `grep -qF "prop_replace 'nifi.remote.input.secure'" /opt/nifi/scripts/start.sh`,
-  `sed -i "s|^prop_replace 'nifi.remote.input.secure'.*|prop_replace 'nifi.remote.input.secure' 'false'|" /opt/nifi/scripts/start.sh`,
-  // Properties start.sh never rewrites: HTTP listener (blank host = all
-  // interfaces), flow.json re-pointed onto the persistent bind mount (conf/
-  // itself must NOT be bind-mounted — a host mount would shadow the image's
-  // conf and leave no nifi.properties at all), and growth caps so the 30 GiB
-  // slot volume cannot fill (provenance bounded; content archive cleanup
-  // starts at 50% filesystem usage).
-  "sed -i" +
-    " -e 's|^nifi.web.http.port=.*|nifi.web.http.port=8080|'" +
-    " -e 's|^nifi.web.http.host=.*|nifi.web.http.host=|'" +
-    " -e 's|^nifi.flow.configuration.file=.*|nifi.flow.configuration.file=/opt/nifi/nifi-current/flow_storage/flow.json.gz|'" +
-    " -e 's|^nifi.flow.configuration.archive.dir=.*|nifi.flow.configuration.archive.dir=/opt/nifi/nifi-current/flow_storage/archive/|'" +
-    " -e 's|^nifi.provenance.repository.max.storage.size=.*|nifi.provenance.repository.max.storage.size=2 GB|'" +
-    " -e 's|^nifi.provenance.repository.max.storage.time=.*|nifi.provenance.repository.max.storage.time=7 days|'" +
-    " -e 's|^nifi.content.repository.archive.max.usage.percentage=.*|nifi.content.repository.archive.max.usage.percentage=50%|'" +
-    " /opt/nifi/nifi-current/conf/nifi.properties",
-  "exec /opt/nifi/scripts/start.sh",
-].join(" &&\n");
+// STRING RULES: this is ONE JSON string handed to /bin/sh -c (dash). No `${`
+// sequence anywhere (Terraform template collision in cdk.tf.json — bare $VAR
+// is safe, dash expands it at runtime; the RAW-port sed pattern deliberately
+// starts at `{`). sed scripts containing double quotes ride in sh single
+// quotes; `|` is the sed delimiter; `\n` in replacements is GNU sed. sed
+// exits 0 on no-match, so the drift failure mode is DOWNSTREAM but still
+// loud: unpatched authorizers.xml aborts NiFi startup, and a changed
+// properties layout surfaces as the health check failing.
+function nifiTlsWrapper(ns: string): string {
+  const n1 = `CN=nifi-1.${ns}, OU=NIFI`;
+  const n2 = `CN=nifi-2.${ns}, OU=NIFI`;
+  const n3 = `CN=nifi-3.${ns}, OU=NIFI`;
+  const az = "/opt/nifi/nifi-current/conf/authorizers.xml";
+  return [
+    `case "$KEYSTORE_B64" in PLACEHOLDER*) echo 'TLS keystore secret not populated - run the put-secret-value steps in README-nifi-cluster.md' >&2; exit 1;; esac`,
+    `case "$TRUSTSTORE_B64" in PLACEHOLDER*) echo 'TLS truststore secret not populated - run the put-secret-value steps in README-nifi-cluster.md' >&2; exit 1;; esac`,
+    `printf '%s' "$KEYSTORE_B64" | base64 -d > /opt/nifi/nifi-current/conf/keystore.p12`,
+    `printf '%s' "$TRUSTSTORE_B64" | base64 -d > /opt/nifi/nifi-current/conf/truststore.p12`,
+    `chmod 600 /opt/nifi/nifi-current/conf/keystore.p12 /opt/nifi/nifi-current/conf/truststore.p12`,
+    // The decoded files are all secure.sh needs; drop the ~7 KiB blobs so they
+    // never linger in NiFi's process environment.
+    `unset KEYSTORE_B64 TRUSTSTORE_B64`,
+    // Idempotency guards (grep -qF): a restarted container reuses its
+    // filesystem, so the appends must not run twice. The empty "...1"
+    // elements are preserved verbatim — secure.sh's own seds fill them later.
+    `if ! grep -qF 'Initial User Identity 2' ${az}; then sed -i 's|<property name="Initial User Identity 1"></property>|<property name="Initial User Identity 1"></property>\\n        <property name="Initial User Identity 2">${n1}</property>\\n        <property name="Initial User Identity 3">${n2}</property>\\n        <property name="Initial User Identity 4">${n3}</property>|' ${az}; fi`,
+    `if ! grep -qF 'Node Identity 2' ${az}; then sed -i 's|<property name="Node Identity 1"></property>|<property name="Node Identity 1"></property>\\n        <property name="Node Identity 2">${n2}</property>\\n        <property name="Node Identity 3">${n3}</property>|' ${az}; fi`,
+    // Persist users/policies across full-cluster restarts (no-op if the
+    // upstream template ever changes these paths — then they stay ephemeral).
+    `sed -i 's|<property name="Users File">./conf/users.xml</property>|<property name="Users File">/opt/nifi/nifi-current/flow_storage/users.xml</property>|' ${az}`,
+    `sed -i 's|<property name="Authorizations File">./conf/authorizations.xml</property>|<property name="Authorizations File">/opt/nifi/nifi-current/flow_storage/authorizations.xml</property>|' ${az}`,
+    `if grep -qF '{NIFI_REMOTE_INPUT_SOCKET_PORT:-10000}' /opt/nifi/scripts/start.sh; then sed -i 's|{NIFI_REMOTE_INPUT_SOCKET_PORT:-10000}|{NIFI_REMOTE_INPUT_SOCKET_PORT}|' /opt/nifi/scripts/start.sh; fi`,
+    "sed -i" +
+      " -e 's|^nifi.flow.configuration.file=.*|nifi.flow.configuration.file=/opt/nifi/nifi-current/flow_storage/flow.json.gz|'" +
+      " -e 's|^nifi.flow.configuration.archive.dir=.*|nifi.flow.configuration.archive.dir=/opt/nifi/nifi-current/flow_storage/archive/|'" +
+      " -e 's|^nifi.provenance.repository.max.storage.size=.*|nifi.provenance.repository.max.storage.size=2 GB|'" +
+      " -e 's|^nifi.provenance.repository.max.storage.time=.*|nifi.provenance.repository.max.storage.time=7 days|'" +
+      " -e 's|^nifi.content.repository.archive.max.usage.percentage=.*|nifi.content.repository.archive.max.usage.percentage=50%|'" +
+      " /opt/nifi/nifi-current/conf/nifi.properties",
+    "exec /opt/nifi/scripts/start.sh",
+  ].join(" &&\n");
+}
 
 export interface NifiContainerOptions {
   readonly slotName: string;
   readonly namespaceName: string;
   // zk-1.<ns>:2181,zk-2.<ns>:2181,zk-3.<ns>:2181
   readonly zkConnectString: string;
-  readonly sensitiveKeyParameterArn: string;
+  // Whole-secret Secrets Manager ARNs; resolved to AWSCURRENT at container
+  // start. All five are launch-time dependencies: a deleted/unreadable secret
+  // fails every new NiFi task launch.
+  readonly sensitiveKeySecretArn: string;
+  // Consumed by secure.sh (AUTH=tls) and by the health check's curl.
+  readonly tlsKeystorePasswordArn: string;
+  readonly tlsTruststorePasswordArn: string;
+  // base64 of THIS node's keystore.p12 / the shared truststore.p12 — decoded
+  // to files by the wrapper (ECS can inject secrets only as env vars).
+  readonly tlsKeystoreB64SecretArn: string;
+  readonly tlsTruststoreB64SecretArn: string;
 }
 
 export function nifiContainerDefinitions(
@@ -156,7 +194,7 @@ export function nifiContainerDefinitions(
       // co-placed task could never starve the JVM.
       memoryReservation: 2048,
       entryPoint: ["/bin/sh", "-c"],
-      command: [NIFI_HTTP_WRAPPER], // ONE array element — extras would become $0/positional params
+      command: [nifiTlsWrapper(opts.namespaceName)], // ONE array element — extras would become $0/positional params
       environment: [
         { name: "NIFI_CLUSTER_IS_NODE", value: "true" },
         // Stable Cloud Map FQDN, not the container hostname (awsvpc forbids the
@@ -174,17 +212,63 @@ export function nifiContainerDefinitions(
         { name: "NIFI_ELECTION_MAX_CANDIDATES", value: "3" },
         { name: "NIFI_JVM_HEAP_INIT", value: "1g" },
         { name: "NIFI_JVM_HEAP_MAX", value: "1g" },
+        // --- TLS (image's own secured path; secure.sh consumes these) ------
+        { name: "AUTH", value: "tls" },
+        { name: "KEYSTORE_PATH", value: "/opt/nifi/nifi-current/conf/keystore.p12" },
+        { name: "KEYSTORE_TYPE", value: "PKCS12" },
+        { name: "TRUSTSTORE_PATH", value: "/opt/nifi/nifi-current/conf/truststore.p12" },
+        { name: "TRUSTSTORE_TYPE", value: "PKCS12" },
+        // KEY_PASSWORD deliberately absent: PKCS12 forces key pass == store
+        // pass, and secure.sh defaults it to KEYSTORE_PASSWORD.
+        // RFC1779 (comma + space) — must match the admin cert's DN
+        // byte-for-byte; NiFi formats X.509 identities exactly this way.
+        { name: "INITIAL_ADMIN_IDENTITY", value: "CN=admin, OU=NIFI" },
+        // LITERAL nifi-1 on ALL THREE nodes: secure.sh fills "Node Identity 1"
+        // with this value and the wrapper appends identities 2/3, so every
+        // node ends up with an IDENTICAL authorizers.xml (required for
+        // matching authorizer fingerprints across the cluster).
+        { name: "NODE_IDENTITY", value: `CN=nifi-1.${opts.namespaceName}, OU=NIFI` },
+        { name: "NIFI_WEB_HTTPS_PORT", value: "8443" },
+        // NEVER blank: nifi.web.https.host doubles as the node API address
+        // ADVERTISED TO PEERS for REST replication — blank advertises
+        // "localhost" and every peer replicates to itself. Per-node FQDN also
+        // means 127.0.0.1 is NOT bound in-container (health check uses the
+        // FQDN for this reason).
+        { name: "NIFI_WEB_HTTPS_HOST", value: address },
+        // Hygiene: 2.x validates X-ProxyHost/X-Forwarded-Host headers (when
+        // present) and Host-header PORTS against this list; node replication
+        // is exempt. Covers the SSM port-forward (localhost) and peer names.
+        {
+          name: "NIFI_WEB_PROXY_HOST",
+          value:
+            `localhost:8443,127.0.0.1:8443,` +
+            `nifi-1.${opts.namespaceName}:8443,nifi-2.${opts.namespaceName}:8443,nifi-3.${opts.namespaceName}:8443`,
+        },
       ],
       secrets: [
         // Required for cluster nodes (>=12 chars, IDENTICAL on all three — it
         // encrypts sensitive values in flow.json.gz; a mismatch breaks flow
-        // inheritance). Delivered from SSM so it never sits in the task def.
-        { name: "NIFI_SENSITIVE_PROPS_KEY", valueFrom: opts.sensitiveKeyParameterArn },
+        // inheritance). Delivered from Secrets Manager so it never sits in the
+        // task def; the value is injected at container START only — after a
+        // manual put-secret-value, force a new deployment on the nifi services
+        // for tasks to pick it up.
+        { name: "NIFI_SENSITIVE_PROPS_KEY", valueFrom: opts.sensitiveKeySecretArn },
+        // KEYSTORE_PASSWORD is consumed by secure.sh AND by the health
+        // check's curl (file:password syntax — the TLS scripts enforce a
+        // colon-free password). Never unset in the wrapper.
+        { name: "KEYSTORE_PASSWORD", valueFrom: opts.tlsKeystorePasswordArn },
+        { name: "TRUSTSTORE_PASSWORD", valueFrom: opts.tlsTruststorePasswordArn },
+        // base64 text of the .p12 binaries (Secrets Manager holds text; the
+        // wrapper decodes to files, then unsets these). Placeholder values
+        // fail the placeholder guard — deliberate crash-loop until populated.
+        { name: "KEYSTORE_B64", valueFrom: opts.tlsKeystoreB64SecretArn },
+        { name: "TRUSTSTORE_B64", valueFrom: opts.tlsTruststoreB64SecretArn },
       ],
       portMappings: [
-        { containerPort: 8080, protocol: "tcp" }, // web UI/API + node-to-node REST replication
-        { containerPort: 11443, protocol: "tcp" }, // cluster protocol
-        { containerPort: 6342, protocol: "tcp" }, // load-balanced connections
+        { containerPort: 8443, protocol: "tcp" }, // HTTPS UI/API + node-to-node REST replication
+        { containerPort: 11443, protocol: "tcp" }, // cluster protocol (mutual TLS, automatic)
+        { containerPort: 6342, protocol: "tcp" }, // load-balanced connections (TLS, automatic)
+        // RAW site-to-site (10000) is disabled by the wrapper — no mapping.
       ],
       mountPoints: [
         // sourceVolume keys must equal the ECS service volume map keys. conf is
@@ -202,11 +286,20 @@ export function nifiContainerDefinitions(
       // nofile well above the Docker default.
       ulimits: [{ name: "nofile", softLimit: 50000, hardLimit: 50000 }],
       healthCheck: {
-        // Anonymous 200 over HTTP once Jetty is up (curl ships in the image).
-        // Liveness only, on purpose: a quorum-membership check would flap DNS
-        // (a FAILED health check deregisters the Cloud Map record) and restart
-        // nodes during legitimate ZK outages.
-        command: ["CMD-SHELL", "curl -f http://localhost:8080/nifi-api/system-diagnostics || exit 1"],
+        // /nifi-api/authentication/configuration is one of exactly three
+        // UNAUTHENTICATED paths in 2.x (access/config is gone). Under pure
+        // AUTH=tls the web port REQUIRES client certs (needClientAuth, not
+        // want) — the node's own keystore doubles as the client cert (its EKU
+        // includes clientAuth). FQDN, not localhost: with a per-node
+        // https.host, 127.0.0.1 is not bound. Liveness only, on purpose: a
+        // quorum-membership check would flap DNS (a FAILED health check
+        // deregisters the Cloud Map record) and restart nodes during
+        // legitimate ZK outages. Answers as soon as Jetty is up, including
+        // during flow election.
+        command: [
+          "CMD-SHELL",
+          `curl -fsk --max-time 10 --cert-type P12 --cert /opt/nifi/nifi-current/conf/keystore.p12:"$KEYSTORE_PASSWORD" "https://$NIFI_CLUSTER_ADDRESS:8443/nifi-api/authentication/configuration" -o /dev/null || exit 1`,
+        ],
         interval: 30,
         timeout: 10,
         retries: 5, // + startPeriod 300 => ~7.5 min total grace for NAR unpack + election

@@ -19,6 +19,16 @@ require_jdk 21
 prompt_secret TLS_CA_PASS 'CA keystore password'
 prompt_secret TLS_NODE_PASS 'Node keystore password (shared by the three node keystores)'
 
+# The nodes' container health check passes this password to curl as
+# --cert keystore.p12:PASSWORD - a colon inside the value would split the
+# argument there. Reject early, before any keystore is cut with it.
+case $TLS_NODE_PASS in
+  *:*)
+    echo 'error: TLS_NODE_PASS must not contain ":" (it breaks curl --cert keystore.p12:password in the container health check)' >&2
+    exit 1
+    ;;
+esac
+
 if [[ ! -f "$OUT_DIR/ca/ca.p12" || ! -f "$OUT_DIR/ca/ca.pem" ]]; then
   echo "error: CA not found under $OUT_DIR/ca - run 01-generate-ca.sh first" >&2
   exit 1

@@ -8,5 +8,7 @@ cdktf.log
 .terraform
 tsconfig.tsbuildinfo
 scripts/ebs-bootstrap/dist
+# generated TLS key material (CA, keystores, truststore) must never be committed
+scripts/tls/out
 !jest.config.js
 !setup.js

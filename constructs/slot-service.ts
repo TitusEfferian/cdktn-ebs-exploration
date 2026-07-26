@@ -2,7 +2,7 @@ import { Construct } from "constructs";
 import { ITerraformDependable } from "cdktn";
 import { EcsService } from "../.gen/modules/ecs_service";
 import { nifiContainerDefinitions, zookeeperContainerDefinitions } from "./container-definitions";
-import { slotsOfRole, type Slot } from "./slots";
+import { slotsOfRole, type NifiSlotName, type Slot } from "./slots";
 
 export interface SlotServiceProps {
   readonly slot: Slot;
@@ -17,8 +17,15 @@ export interface SlotServiceProps {
   readonly registryArn: string;
   // Private DNS suffix, e.g. "nifi.internal" — slot FQDN = <slot>.<suffix>.
   readonly namespaceName: string;
-  // SecureString parameter holding nifi.sensitive.props.key (NiFi slots only).
-  readonly sensitiveKeyParameterArn: string;
+  // Secrets Manager secrets (whole-secret ARNs). NiFi slots only; zk slots
+  // receive and ignore them. All five bind at container start (AUTH=tls from
+  // first boot) — see container-definitions.ts.
+  readonly sensitiveKeySecretArn: string;
+  readonly tlsKeystorePasswordArn: string;
+  readonly tlsTruststorePasswordArn: string;
+  // Per-node keystore.p12 (base64) — each NiFi service binds only its own.
+  readonly tlsKeystoreB64Arns: Record<NifiSlotName, string>;
+  readonly tlsTruststoreB64Arn: string;
   readonly tags: Record<string, string>;
   // Cluster (capacity-provider association) + this slot's ASG.
   readonly dependsOn: ITerraformDependable[];
@@ -99,14 +106,31 @@ export class SlotService extends Construct {
             data: { host_path: "/mnt/ebs/zookeeper/data" },
             datalog: { host_path: "/mnt/ebs/zookeeper/datalog" },
           },
-      // Execution-role read on the SecureString (module wires ssm:GetParameters).
-      ...(isNifi ? { taskExecSsmParamArns: [props.sensitiveKeyParameterArn] } : {}),
+      // Execution-role read on the secrets (module wires
+      // secretsmanager:GetSecretValue on these exact ARNs; the default
+      // aws/secretsmanager key needs no kms:Decrypt). slot.name narrows to
+      // NifiSlotName here via the aliased isNifi discriminant check.
+      ...(isNifi
+        ? {
+            taskExecSecretArns: [
+              props.sensitiveKeySecretArn,
+              props.tlsKeystorePasswordArn,
+              props.tlsTruststorePasswordArn,
+              props.tlsKeystoreB64Arns[slot.name],
+              props.tlsTruststoreB64Arn,
+            ],
+          }
+        : {}),
       containerDefinitions: isNifi
         ? nifiContainerDefinitions({
             slotName: slot.name,
             namespaceName: props.namespaceName,
             zkConnectString,
-            sensitiveKeyParameterArn: props.sensitiveKeyParameterArn,
+            sensitiveKeySecretArn: props.sensitiveKeySecretArn,
+            tlsKeystorePasswordArn: props.tlsKeystorePasswordArn,
+            tlsTruststorePasswordArn: props.tlsTruststorePasswordArn,
+            tlsKeystoreB64SecretArn: props.tlsKeystoreB64Arns[slot.name],
+            tlsTruststoreB64SecretArn: props.tlsTruststoreB64Arn,
           })
         : zookeeperContainerDefinitions({
             ordinal: slot.ordinal,

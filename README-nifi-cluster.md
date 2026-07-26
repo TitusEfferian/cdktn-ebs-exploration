@@ -7,11 +7,11 @@ volume-survives-the-instance guarantee — now six times over.
 
 ## Topology
 
-| Slot   | AZ              | Instance   | Volume (gp3)     | Task                          |
-|--------|-----------------|------------|------------------|-------------------------------|
-| nifi-1 | ap-northeast-1a | t4g.medium | nifi-1-data 30 G | apache/nifi:2.10.0 (HTTP)     |
-| nifi-2 | ap-northeast-1c | t4g.medium | nifi-2-data 30 G | apache/nifi:2.10.0 (HTTP)     |
-| nifi-3 | ap-northeast-1d | t4g.medium | nifi-3-data 30 G | apache/nifi:2.10.0 (HTTP)     |
+| Slot   | AZ              | Instance   | Volume (gp3)     | Task                           |
+|--------|-----------------|------------|------------------|--------------------------------|
+| nifi-1 | ap-northeast-1a | t4g.medium | nifi-1-data 30 G | apache/nifi:2.10.0 (HTTPS mTLS)|
+| nifi-2 | ap-northeast-1c | t4g.medium | nifi-2-data 30 G | apache/nifi:2.10.0 (HTTPS mTLS)|
+| nifi-3 | ap-northeast-1d | t4g.medium | nifi-3-data 30 G | apache/nifi:2.10.0 (HTTPS mTLS)|
 | zk-1   | ap-northeast-1a | t4g.small  | zk-1-data 10 G   | zookeeper:3.9.5 (ECR mirror)  |
 | zk-2   | ap-northeast-1c | t4g.small  | zk-2-data 10 G   | zookeeper:3.9.5 (ECR mirror)  |
 | zk-3   | ap-northeast-1d | t4g.small  | zk-3-data 10 G   | zookeeper:3.9.5 (ECR mirror)  |
@@ -34,11 +34,14 @@ write `ECS_CLUSTER` **last**. NiFi's repositories
 are host-bind-mounted from the volume, so a slot's whole identity — ZK `myid`,
 NiFi flow + repos — survives instance replacement.
 
-**Unsecured HTTP (deliberate, demo-only):** NiFi 2.x supports HTTP clustering
-(all requests anonymous), but its Docker image removed the HTTP mode — the
-task definition patches the image's `start.sh` at container start (guarded
-`sed`s that FAIL the container loudly if the upstream image changes). TLS is
-prepared but not enabled: see [`scripts/tls/`](scripts/tls/README.md).
+**TLS from first boot:** NiFi runs the image's own `AUTH=tls` path — HTTPS
+UI/API on 8443 with client-certificate auth, mutual TLS on the cluster
+protocol (11443) and load-balance (6342) channels. You mint the CA, per-node
+keystores and shared truststore locally with [`scripts/tls/`](scripts/tls/README.md)
+(outputs are gitignored) and upload them into Secrets Manager via CLI; the
+container decodes them back to files at start and **crash-loops, on purpose,
+until you do** (clear log line, no bogus certs ever). The UI needs
+`admin.p12` imported into your browser — there is no username/password.
 
 The busybox demo from README-ebs-demo.md keeps running unchanged alongside.
 
@@ -72,10 +75,80 @@ aws ec2 describe-instance-types --region $REGION --instance-types t4g.small t4g.
 ```powershell
 cdktn deploy        # review the plan, then approve
 cdktn output        # slot_asg_names, slot_volume_ids, ui_port_forward_hint, ...
+```
 
-# optionally override the NiFi sensitive-props key (>=12 chars; else a demo default is used):
-#   cdktn deploy --var nifi_sensitive_props_key=<random-string>
+## Generate TLS material + populate ALL SEVEN secrets (REQUIRED)
 
+Terraform only creates placeholder-seeded Secrets Manager secrets and ignores
+value changes forever — the real values are yours to set. **NiFi tasks
+crash-loop with a clear log line (`TLS keystore secret not populated...`)
+until the four TLS material secrets hold real base64** — deliberate
+fail-closed. The order is always deploy → populate → roll: `put-secret-value`
+cannot create a secret, the secrets only exist after `cdktn deploy` (and a
+destroy deletes them, recovery window 0), so run the uploads right after
+deploy while NiFi crash-loops harmlessly, then force a new deployment on
+nifi-1/2/3. Step 1 (minting the TLS material) can happen anytime — before or
+after deploy.
+
+Step 1 — mint the CA + node keystores + shared truststore + admin browser cert
+(outputs land in gitignored `scripts/tls/out`; the keystore password must be
+**colon-free** — `02` enforces it). Needs JDK 21+ (`keytool -version`) and Git
+for Windows; from PowerShell, Git Bash runs the scripts (bare `bash` would hit
+Windows' WSL stub):
+
+```powershell
+cd scripts\tls
+$env:TLS_CA_PASS='...'; $env:TLS_NODE_PASS='...'; $env:TLS_TRUST_PASS='...'; $env:TLS_ADMIN_PASS='...'
+$gitbash = 'C:\Program Files\Git\bin\bash.exe'
+& $gitbash 01-generate-ca.sh; & $gitbash 02-generate-node-certs.sh; & $gitbash 03-generate-truststore.sh; & $gitbash 04-generate-admin-cert.sh; & $gitbash 99-verify.sh
+cd ..\..
+```
+
+(sh equivalent for WSL/Docker/Linux — see `scripts/tls/README.md`; no JDK
+locally? `docker run --rm -it -v "${PWD}\scripts\tls:/tls" -w /tls
+eclipse-temurin:21 bash` from the repo root, then run the scripts inside.)
+
+Step 2 — upload (PowerShell, from the repo root):
+
+```powershell
+# the NiFi sensitive-props key (>=12 chars, encrypts sensitive values in flow.json):
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/sensitive-props-key --secret-string 'your-random-key-min-12-chars'
+
+# the two TLS passwords (exactly the values you exported in step 1):
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-password   --secret-string 'the-TLS_NODE_PASS-you-used'
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/truststore-password --secret-string 'the-TLS_TRUST_PASS-you-used'
+
+# the TLS material as base64 text (decoded back to .p12 files at container start):
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-1 --secret-string ([Convert]::ToBase64String([IO.File]::ReadAllBytes("scripts\tls\out\nodes\nifi-1\keystore.p12")))
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-2 --secret-string ([Convert]::ToBase64String([IO.File]::ReadAllBytes("scripts\tls\out\nodes\nifi-2\keystore.p12")))
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-3 --secret-string ([Convert]::ToBase64String([IO.File]::ReadAllBytes("scripts\tls\out\nodes\nifi-3\keystore.p12")))
+aws secretsmanager put-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/truststore --secret-string ([Convert]::ToBase64String([IO.File]::ReadAllBytes("scripts\tls\out\shared\truststore.p12")))
+
+# verify all SEVEN landed — each line prints "False <length>" when populated, or
+# "True <length>" while still the placeholder (the value itself is never printed):
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/sensitive-props-key --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-password --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/truststore-password --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-1 --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-2 --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-3 --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/truststore --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
+
+# secrets are injected at container START only — roll the three NiFi services:
+aws ecs update-service --region $REGION --cluster $CLUSTER --service nifi-1 --force-new-deployment | Out-Null
+aws ecs update-service --region $REGION --cluster $CLUSTER --service nifi-2 --force-new-deployment | Out-Null
+aws ecs update-service --region $REGION --cluster $CLUSTER --service nifi-3 --force-new-deployment | Out-Null
+aws ecs wait services-stable --region $REGION --cluster $CLUSTER --services nifi-1 nifi-2 nifi-3
+```
+
+**NEVER delete these secrets**: all five per-node bindings (key, two
+passwords, keystore, truststore) are launch-time dependencies — a missing one
+fails every new NiFi task. Set the sensitive-props key BEFORE building any
+flow you care about: it encrypts sensitive component properties inside
+`flow.json.gz`, so changing it later invalidates those saved values (a
+destroy-first workflow sidesteps this entirely).
+
+```powershell
 # watch all six services come up (Ctrl+C to stop):
 while ($true) { aws ecs describe-services --region $REGION --cluster $CLUSTER --services nifi-1 nifi-2 nifi-3 zk-1 zk-2 zk-3 --query "services[].{name:serviceName,desired:desiredCount,running:runningCount,status:status}" --output table; Start-Sleep 10 }
 ```
@@ -106,8 +179,14 @@ aws ecs execute-command --region $REGION --cluster $CLUSTER --task $ZK_TASK --co
 
 ## Open the NiFi UI (SSM port-forward)
 
+One-time browser prep: import `scripts/tls/out/clients/admin/admin.p12`
+(password = your `TLS_ADMIN_PASS`) into the browser/OS certificate store —
+the UI authenticates by client certificate; there is no username/password.
+Optionally trust `scripts/tls/out/ca/ca.pem` to silence the server-cert
+warning (the server cert is signed by your private CA).
+
 The tasks live in private subnets with no load balancer; the tunnel rides SSM
-through the slot's own instance (instance SG → task SG :8080 is allowed):
+through the slot's own instance (instance SG → task SG :8443 is allowed):
 
 ```powershell
 $TASK = aws ecs list-tasks --region $REGION --cluster $CLUSTER --service-name nifi-1 --query "taskArns[0]" --output text
@@ -115,18 +194,26 @@ $TASK_IP = aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks $T
 $CI  = aws ecs describe-tasks --region $REGION --cluster $CLUSTER --tasks $TASK --query "tasks[0].containerInstanceArn" --output text
 $IID = aws ecs describe-container-instances --region $REGION --cluster $CLUSTER --container-instances $CI --query "containerInstances[0].ec2InstanceId" --output text
 
-aws ssm start-session --region $REGION --target $IID --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters "host=$TASK_IP,portNumber=8080,localPortNumber=8080"
+aws ssm start-session --region $REGION --target $IID --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters "host=$TASK_IP,portNumber=8443,localPortNumber=8443"
 ```
 
 > Windows note: use exactly this **shorthand** `--parameters` form. The JSON
 > form breaks silently under Windows PowerShell 5.1 (it strips the inner
 > quotes before the CLI sees them).
 
-Browse **http://localhost:8080/nifi** (no login — anonymous HTTP demo mode).
-Cluster state from the same tunnel:
+Browse **https://localhost:8443/nifi** — accept the CA warning (unless you
+trusted `ca.pem`) and pick the `admin` certificate when the browser prompts.
+`localhost`/`127.0.0.1` are in every node cert's SAN precisely for this tunnel.
+
+Cluster state check — from INSIDE a nifi container (the API requires a client
+certificate; the node's own keystore doubles as one, and Windows PowerShell
+5.1 can neither skip CA validation nor send P12 client certs cleanly):
 
 ```powershell
-(Invoke-RestMethod "http://localhost:8080/nifi-api/controller/cluster").cluster.nodes | Select-Object address,status   # expect 3 x CONNECTED
+aws ecs execute-command --region $REGION --cluster $CLUSTER --task $TASK --container nifi --interactive --command "/bin/bash"
+#   inside:
+#     curl -fsk --cert-type P12 --cert /opt/nifi/nifi-current/conf/keystore.p12:"$KEYSTORE_PASSWORD" https://nifi-1.nifi.internal:8443/nifi-api/controller/cluster | grep -o '"status":"[A-Z_]*"' | sort | uniq -c
+#   expect: 3 x "CONNECTED"
 ```
 
 `Ctrl+C` ends the tunnel.
@@ -183,14 +270,14 @@ aws route53 wait resource-record-sets-changed --id $CHANGE_ID
 (Change only the SOA — never the NS record. Effective negative TTL =
 min(SOA record TTL, SOA minimum field), hence 60/60.)
 
-## Enabling TLS later
+## How the TLS pieces fit
 
-Everything needed to mint a CA + per-node keystores + shared truststore with
-plain JDK 21 `keytool` (NiFi 2.x removed tls-toolkit) is in
-[`scripts/tls/`](scripts/tls/README.md), including the artifact layout for
-S3 delivery, the identity-string (RFC1779) rules, the `authorizers.xml`
-Node-Identity gap in the stock image, and the exact env-var flip from the
-HTTP entrypoint patch to the image's own `AUTH=tls` path.
+TLS is ON from first boot — [`scripts/tls/README.md`](scripts/tls/README.md)
+documents the whole wiring: the keytool suite (plain JDK 21 `keytool`; NiFi
+2.x removed tls-toolkit), the Secrets Manager delivery flow, the RFC1779
+identity-string rules, how the container wrapper fixes the stock image's
+`authorizers.xml` Node-Identity gap and persists `users.xml`/
+`authorizations.xml` into `flow_storage/`, and rotation.
 
 ## Teardown
 
@@ -205,4 +292,8 @@ Skipping step 1 usually still works — destroying the ASGs terminates the
 instances, which auto-detaches the volumes — but Terraform will sit retrying
 `DeleteVolume` (VolumeInUse) for up to ~10 minutes per volume if a detach is
 slow. There is **no prevent_destroy** on the slot volumes: destroy deletes the
-data, by design, for this demo.
+data, by design, for this demo. The seven Secrets Manager secrets delete
+immediately too (`recovery_window_in_days = 0` — no 30-day "scheduled for
+deletion" state), so their names are instantly reusable on the next deploy;
+re-populate ALL of them after every fresh deploy (the TLS material in
+`scripts/tls/out` can be re-uploaded as-is — no need to re-mint certs).

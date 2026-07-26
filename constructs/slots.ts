@@ -46,6 +46,8 @@ export const SLOTS = [
 export type Slot = (typeof SLOTS)[number];
 export type SlotName = Slot["name"];
 export type SlotOfRole<R extends Role> = Extract<Slot, { role: R }>;
+// Keyed maps of per-NiFi-node resources (e.g. the per-node keystore secrets).
+export type NifiSlotName = SlotOfRole<"nifi">["name"];
 
 // Manual type predicate: the generic comparison defeats TS 5.5+ predicate
 // auto-inference. Keep the body to exactly this discriminant equality —
