@@ -109,15 +109,13 @@ export function containerDefinitions(
 //      operator uploads real base64 via put-secret-value (fail-closed),
 //   2. decodes them to the .p12 paths secure.sh expects (conf/ is a fresh
 //      anonymous volume per task; nothing in the image wipes it afterwards),
-//   3. appends the two MISSING node identities to authorizers.xml — secure.sh
-//      fills only the "...1" slots, and FileAccessPolicyProvider throws at
-//      startup ("Unable to locate node ... to seed policies") when a Node
-//      Identity is not also a user-group-provider user. sed, NOT xmlstarlet:
-//      xmlstarlet re-serializes the empty elements self-closing, which would
-//      break secure.sh's own literal sed patterns,
-//   4. re-points users.xml/authorizations.xml into persisted flow_storage so
-//      UI-added users/policies survive a FULL-cluster restart (a single
-//      replaced node would re-inherit them from the cluster anyway),
+//   3. appends ALL THREE node DNs to authorizers.xml, in BOTH providers —
+//      secure.sh fills only the "...1" slots, and FileAccessPolicyProvider
+//      throws at startup ("Unable to locate node ... to seed policies") when a
+//      Node Identity is not also a user-group-provider user. sed, NOT
+//      xmlstarlet: xmlstarlet re-serializes the empty elements self-closing,
+//      which would break secure.sh's own literal sed patterns,
+//   4. ASSERTS the result before handing over — see the assertions below,
 //   5. blanks the RAW site-to-site port default — start.sh would otherwise
 //      set 10000 and NiFi would bind a TLS S2S listener nobody uses,
 //   6. keeps the flow_storage re-point + growth-cap property edits (conf/
@@ -125,6 +123,18 @@ export function containerDefinitions(
 //      and leave no nifi.properties at all; the flow lives in flow_storage),
 //   7. execs start.sh — image keeps its env handling, ZK wiring, log tailing
 //      and signal traps; NiFi becomes PID 1 for direct SIGTERM.
+//
+// TENANT FILES ARE DELIBERATELY EPHEMERAL: users.xml/authorizations.xml keep
+// the image's ./conf defaults and re-seed from the Initial User/Node Identity
+// entries on EVERY container start. Persisting them onto the volume is a trap:
+// FileUserGroupProvider.load seeds ONLY when the tenants file has zero users
+// AND zero groups, so any pre-existing users.xml silently suppresses seeding
+// forever — and because the user-group provider is configured BEFORE the
+// access-policy provider, the very first failed boot writes an admin-only
+// users.xml that then blocks every later boot. Trade-off: UI-created
+// users/policies survive a single node's replacement (the joining node
+// force-inherits tenants from the cluster) but NOT a simultaneous full-cluster
+// restart — acceptable for this demo's destroy-first workflow.
 //
 // STRING RULES: this is ONE JSON string handed to /bin/sh -c (dash). No `${`
 // sequence anywhere (Terraform template collision in cdk.tf.json — bare $VAR
@@ -148,15 +158,47 @@ function nifiTlsWrapper(ns: string): string {
     // The decoded files are all secure.sh needs; drop the ~7 KiB blobs so they
     // never linger in NiFi's process environment.
     `unset KEYSTORE_B64 TRUSTSTORE_B64`,
+    `echo 'nifi-wrapper: patching authorizers.xml and start.sh' >&2`,
     // Idempotency guards (grep -qF): a restarted container reuses its
     // filesystem, so the appends must not run twice. The empty "...1"
     // elements are preserved verbatim — secure.sh's own seds fill them later.
-    `if ! grep -qF 'Initial User Identity 2' ${az}; then sed -i 's|<property name="Initial User Identity 1"></property>|<property name="Initial User Identity 1"></property>\\n        <property name="Initial User Identity 2">${n1}</property>\\n        <property name="Initial User Identity 3">${n2}</property>\\n        <property name="Initial User Identity 4">${n3}</property>|' ${az}; fi`,
-    `if ! grep -qF 'Node Identity 2' ${az}; then sed -i 's|<property name="Node Identity 1"></property>|<property name="Node Identity 1"></property>\\n        <property name="Node Identity 2">${n2}</property>\\n        <property name="Node Identity 3">${n3}</property>|' ${az}; fi`,
-    // Persist users/policies across full-cluster restarts (no-op if the
-    // upstream template ever changes these paths — then they stay ephemeral).
-    `sed -i 's|<property name="Users File">./conf/users.xml</property>|<property name="Users File">/opt/nifi/nifi-current/flow_storage/users.xml</property>|' ${az}`,
-    `sed -i 's|<property name="Authorizations File">./conf/authorizations.xml</property>|<property name="Authorizations File">/opt/nifi/nifi-current/flow_storage/authorizations.xml</property>|' ${az}`,
+    //
+    // GUARD ON THE FULL ELEMENT, never the bare property name: the shipped
+    // authorizers.xml documents its own property names in prose comments
+    // ("Initial User Identity 1", "Initial User Identity 2", ... at line 38;
+    // the same for Node Identity at line 248), so `grep -qF 'Initial User
+    // Identity 2'` matches the COMMENT on a pristine file and skips the sed
+    // forever. That bug shipped once and cost a full debugging cycle: every
+    // node booted with a Node Identity that had no matching user and died in
+    // FileAccessPolicyProvider. Comments contain no `<property name=` text,
+    // so anchoring on the opening tag is unambiguous.
+    `if ! grep -qF '<property name="Initial User Identity 2">' ${az}; then sed -i 's|<property name="Initial User Identity 1"></property>|<property name="Initial User Identity 1"></property>\\n        <property name="Initial User Identity 2">${n1}</property>\\n        <property name="Initial User Identity 3">${n2}</property>\\n        <property name="Initial User Identity 4">${n3}</property>|' ${az}; fi`,
+    // List ALL THREE node DNs explicitly, exactly like the user identities
+    // above. Every node must trust every node's DN as a proxy: the browser
+    // hits one node, which replicates the request to its peers as itself, and
+    // a peer that does not list that DN rejects it ("Untrusted proxy CN=...")
+    // — which the UI renders as a bare "An unexpected error has occurred".
+    // Do NOT lean on secure.sh's slot-1 value to complete the set: it writes
+    // the PER-NODE NODE_IDENTITY, so hardcoding only the other two here left
+    // nifi-2 and nifi-3 each trusting {self, nifi-2, nifi-3} and missing
+    // nifi-1 (observed 2026-07-28). Slot 1 now merely duplicates one of these
+    // entries, which is harmless — both file providers dedupe identities.
+    `if ! grep -qF '<property name="Node Identity 2">' ${az}; then sed -i 's|<property name="Node Identity 1"></property>|<property name="Node Identity 1"></property>\\n        <property name="Node Identity 2">${n1}</property>\\n        <property name="Node Identity 3">${n2}</property>\\n        <property name="Node Identity 4">${n3}</property>|' ${az}; fi`,
+    // Fail loud, fail here. sed exits 0 on no-match, so without these a future
+    // upstream layout change would silently reproduce the exact outage above.
+    // secure.sh has NOT run yet, so the "...1" anchors must still be EMPTY —
+    // asserting that proves we did not clobber its insertion points. The
+    // counts catch partial/duplicated appends (comments are not counted).
+    `grep -qF '<property name="Initial User Identity 2">${n1}</property>' ${az} || { echo 'FATAL authorizers.xml: missing Initial User Identity 2 (nifi-1)' >&2; exit 1; }`,
+    `grep -qF '<property name="Initial User Identity 3">${n2}</property>' ${az} || { echo 'FATAL authorizers.xml: missing Initial User Identity 3 (nifi-2)' >&2; exit 1; }`,
+    `grep -qF '<property name="Initial User Identity 4">${n3}</property>' ${az} || { echo 'FATAL authorizers.xml: missing Initial User Identity 4 (nifi-3)' >&2; exit 1; }`,
+    `grep -qF '<property name="Node Identity 2">${n1}</property>' ${az} || { echo 'FATAL authorizers.xml: missing Node Identity 2 (nifi-1)' >&2; exit 1; }`,
+    `grep -qF '<property name="Node Identity 3">${n2}</property>' ${az} || { echo 'FATAL authorizers.xml: missing Node Identity 3 (nifi-2)' >&2; exit 1; }`,
+    `grep -qF '<property name="Node Identity 4">${n3}</property>' ${az} || { echo 'FATAL authorizers.xml: missing Node Identity 4 (nifi-3)' >&2; exit 1; }`,
+    `grep -qF '<property name="Initial User Identity 1"></property>' ${az} || { echo 'FATAL authorizers.xml: Initial User Identity 1 anchor no longer empty - secure.sh cannot seed the admin' >&2; exit 1; }`,
+    `grep -qF '<property name="Node Identity 1"></property>' ${az} || { echo 'FATAL authorizers.xml: Node Identity 1 anchor no longer empty - secure.sh cannot seed this node' >&2; exit 1; }`,
+    `[ "$(grep -c '<property name="Initial User Identity ' ${az})" -eq 4 ] || { echo 'FATAL authorizers.xml: expected exactly 4 Initial User Identity elements' >&2; exit 1; }`,
+    `[ "$(grep -c '<property name="Node Identity ' ${az})" -eq 4 ] || { echo 'FATAL authorizers.xml: expected exactly 4 Node Identity elements' >&2; exit 1; }`,
     `if grep -qF '{NIFI_REMOTE_INPUT_SOCKET_PORT:-10000}' /opt/nifi/scripts/start.sh; then sed -i 's|{NIFI_REMOTE_INPUT_SOCKET_PORT:-10000}|{NIFI_REMOTE_INPUT_SOCKET_PORT}|' /opt/nifi/scripts/start.sh; fi`,
     "sed -i" +
       " -e 's|^nifi.flow.configuration.file=.*|nifi.flow.configuration.file=/opt/nifi/nifi-current/flow_storage/flow.json.gz|'" +
@@ -228,11 +270,13 @@ export function nifiContainerDefinitions(
         // RFC1779 (comma + space) — must match the admin cert's DN
         // byte-for-byte; NiFi formats X.509 identities exactly this way.
         { name: "INITIAL_ADMIN_IDENTITY", value: "CN=admin, OU=NIFI" },
-        // LITERAL nifi-1 on ALL THREE nodes: secure.sh fills "Node Identity 1"
-        // with this value and the wrapper appends identities 2/3, so every
-        // node ends up with an IDENTICAL authorizers.xml (required for
-        // matching authorizer fingerprints across the cluster).
-        { name: "NODE_IDENTITY", value: `CN=nifi-1.${opts.namespaceName}, OU=NIFI` },
+        // This node's own DN, written by secure.sh into the empty "Node
+        // Identity 1" slot. It is REDUNDANT by design: the wrapper already
+        // appends all three node DNs (slots 2-4), so the trust set is complete
+        // and identical on every node no matter what lands in slot 1 — which
+        // is what matters for matching authorizer fingerprints. Keeping it
+        // per-node is the honest value; correctness no longer depends on it.
+        { name: "NODE_IDENTITY", value: `CN=${address}, OU=NIFI` },
         { name: "NIFI_WEB_HTTPS_PORT", value: "8443" },
         // NEVER blank: nifi.web.https.host doubles as the node API address
         // ADVERTISED TO PEERS for REST replication — blank advertises

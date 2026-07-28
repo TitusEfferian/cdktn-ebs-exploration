@@ -154,20 +154,32 @@ runs with blank passwords + missing store files). The container wrapper in
    (loud `exit 1` → ECS restarts until you upload — fail-closed);
 2. decodes `KEYSTORE_B64`/`TRUSTSTORE_B64` to
    `/opt/nifi/nifi-current/conf/*.p12` (`chmod 600`), then unsets the blobs;
-3. fixes the **image gap**: `secure.sh` writes only `Node Identity 1`, but a
+3. fixes the **image gap**: `secure.sh` writes only the `...1` slots, but a
    3-node mTLS cluster needs all three node DNs as BOTH access-policy
-   `Node Identity 1..3` AND user-group `Initial User Identity` entries on
-   EVERY node (NiFi refuses to start otherwise) — the wrapper sed-appends the
-   missing entries, identically on all nodes;
-4. re-points `users.xml`/`authorizations.xml` into persisted `flow_storage/`
-   so UI-added users/policies survive a full-cluster restart;
+   `Node Identity` AND user-group `Initial User Identity` entries on
+   EVERY node — NiFi refuses to start when a node DN has no matching user, and
+   a node missing a *peer's* DN rejects that peer's replicated requests
+   ("Untrusted proxy"). The wrapper therefore sed-appends **all three** DNs to
+   both providers (slots 2-4), identically on all nodes, then **asserts** they
+   are there
+   and aborts with a `FATAL authorizers.xml:` line if not (a guard that
+   matched the shipped file's own prose comments once made these appends
+   silently no-op, and every node died in `FileAccessPolicyProvider`);
+4. leaves `users.xml`/`authorizations.xml` at their ephemeral `./conf`
+   defaults **on purpose** — they re-seed from the identity entries on every
+   start. Persisting them onto the volume is a trap: NiFi seeds tenants only
+   when the file has zero users, so any pre-existing `users.xml` suppresses
+   seeding forever. Cost: UI-created users/policies survive a single node's
+   replacement (it force-inherits tenants from the cluster) but not a
+   simultaneous full-cluster restart;
 5. disables RAW site-to-site (start.sh would default the port to 10000).
 
 Env per node (see `container-definitions.ts` for the full table):
 `KEYSTORE_PATH/TYPE`, `TRUSTSTORE_PATH/TYPE` (PKCS12; `KEY_PASSWORD` omitted —
 PKCS12 key pass == store pass), `INITIAL_ADMIN_IDENTITY=CN=admin, OU=NIFI`,
-`NODE_IDENTITY=CN=nifi-1.nifi.internal, OU=NIFI` (literal `nifi-1` on ALL
-nodes — authorizers.xml must be identical cluster-wide),
+`NODE_IDENTITY=CN=<own FQDN>, OU=NIFI` (per node, and deliberately redundant —
+the wrapper already appends all three DNs, so authorizers.xml ends up identical
+cluster-wide regardless, which is what the authorizer fingerprint check needs),
 `NIFI_WEB_HTTPS_PORT=8443`, `NIFI_WEB_HTTPS_HOST=<own FQDN>` (**never blank**:
 it doubles as the node API address advertised to peers — blank would advertise
 `localhost` and self-loop replication), `NIFI_WEB_PROXY_HOST=localhost:8443,

@@ -41,11 +41,17 @@ export class ServiceDiscovery extends Construct {
           routingPolicy: "MULTIVALUE",
           dnsRecords: [{ type: "A", ttl: 10 }],
         },
-        // ECS custom health status. Empty block on purpose: failure_threshold
-        // is deprecated (AWS forces 1). A record that turns UNHEALTHY still
-        // resolves while it is the only record (all-unhealthy fallback), so
-        // bootstrap is never DNS-blocked; a FAILED health check deregisters it.
-        healthCheckCustomConfig: {},
+        // NO health_check_custom_config block — deliberately. The provider
+        // never persists an empty block to state (state shows []), so a
+        // present-but-empty block diffs on EVERY plan, and the block is
+        // ForceNew: each apply then REPLACES all six discovery services,
+        // silently deregistering every record that live tasks had registered.
+        // Observed 2026-07-28: a taskdef-only apply wiped the zk-* A records
+        // and crash-looped the whole NiFi cluster (ECS re-registers a task
+        // only at task start, so stable long-running tasks never come back).
+        // Omission changes nothing functionally for 1-task services: ECS still
+        // registers/deregisters the task IP on start/stop, and with no health
+        // config the record always resolves.
         // Demo teardown: deregister any lingering instances on destroy.
         forceDestroy: true,
         tags: props.tags,

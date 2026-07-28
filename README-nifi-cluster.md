@@ -275,9 +275,10 @@ min(SOA record TTL, SOA minimum field), hence 60/60.)
 TLS is ON from first boot — [`scripts/tls/README.md`](scripts/tls/README.md)
 documents the whole wiring: the keytool suite (plain JDK 21 `keytool`; NiFi
 2.x removed tls-toolkit), the Secrets Manager delivery flow, the RFC1779
-identity-string rules, how the container wrapper fixes the stock image's
-`authorizers.xml` Node-Identity gap and persists `users.xml`/
-`authorizations.xml` into `flow_storage/`, and rotation.
+identity-string rules, how the container wrapper fixes (and then asserts) the
+stock image's `authorizers.xml` Node-Identity gap, why tenant files
+(`users.xml`/`authorizations.xml`) stay ephemeral and re-seed every start, and
+rotation.
 
 ## Teardown
 
