@@ -47,7 +47,12 @@ export interface ContainerDefinition {
   readonly cpu?: number;
   readonly memory?: number;
   readonly memoryReservation?: number;
-  readonly entryPoint?: string[];
+  // NOTE: lowercase `entrypoint` is the module's variable name — the lone
+  // deviation from the ECS API's camelCase (`entryPoint`) in the
+  // container-definition submodule. The camelCase form is silently DROPPED
+  // (unknown key), which ships a task definition without the override and the
+  // image's stock start.sh runs unwrapped.
+  readonly entrypoint?: string[];
   readonly command?: string[];
   readonly environment?: ContainerEnvVar[];
   readonly secrets?: ContainerSecret[];
@@ -193,7 +198,7 @@ export function nifiContainerDefinitions(
       // Task memory is 3072 (hard, service level); reserve 2048 so a stray
       // co-placed task could never starve the JVM.
       memoryReservation: 2048,
-      entryPoint: ["/bin/sh", "-c"],
+      entrypoint: ["/bin/sh", "-c"],
       command: [nifiTlsWrapper(opts.namespaceName)], // ONE array element — extras would become $0/positional params
       environment: [
         { name: "NIFI_CLUSTER_IS_NODE", value: "true" },
