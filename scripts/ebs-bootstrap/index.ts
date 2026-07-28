@@ -1,15 +1,23 @@
-// On-instance boot program: idempotently discover, attach, and mount a tagged
-// EBS volume, then register this host with its ECS cluster. Ported from the
-// original scripts/user-data.sh; runs as root on the ECS-optimized AL2023
+// On-instance boot program: idempotently discover, attach, and mount this
+// slot's tagged EBS volume, prepare the role's bind-mount directories, and only
+// THEN configure the ECS agent. Runs as root on the ECS-optimized AL2023
 // (arm64) AMI. The ASG launches each instance once, so this runs on a fresh
 // first boot per instance (and again on every ASG replacement).
 //
 // INVARIANT: this NEVER reformats a device that already carries a filesystem —
 // that is what preserves data across instance replacement in the EBS demo.
 //
+// ORDERING: ECS_CLUSTER is written LAST (and a systemd drop-in gates the agent
+// on the mount). The agent's unit already starts after cloud-final, but
+// write-last makes any violation loud: an early agent joins the "default"
+// cluster where no service places tasks, instead of silently starting a task
+// against an unmounted /mnt/ebs.
+//
 // Config is passed by scripts/bootstrap.sh via environment variables:
-//   VOLUME_TAG    value of the Name tag on the target EBS volume
+//   VOLUME_TAG    value of the Name tag on this slot's EBS volume
 //   CLUSTER_NAME  ECS cluster this instance should register with
+//   SLOT_NAME     slot identity (nifi-1..3, zk-1..3, or "app" for the demo)
+//   NODE_ROLE     "nifi" | "zookeeper" | "app" — selects the /mnt/ebs subdirs
 //
 // Logging is plain stdout/stderr with a step prefix; the bootstrap already fans
 // our output to file + syslog + console, so we do not duplicate that here.
@@ -18,10 +26,16 @@
 // and ./disk (esbuild bundles the whole graph into one file for the instance).
 
 import { EC2Client, EC2ServiceException } from "@aws-sdk/client-ec2";
-import { upsertEcsCluster } from "./ecs";
+import { installEcsMountGuard, upsertEcsConfig } from "./ecs";
 import { getInstanceIdentity } from "./imds";
 import { discoverVolume, ensureAttached } from "./volume";
-import { resolveDevice, prepareFilesystem, updateFstab, mountAndPermit } from "./disk";
+import {
+  resolveDevice,
+  prepareFilesystem,
+  updateFstab,
+  mountAndPermit,
+  prepareRoleDirs,
+} from "./disk";
 import { errlog, log, nowIso, requireEnv } from "./utils";
 
 // --- Orchestration -----------------------------------------------------------
@@ -30,9 +44,9 @@ async function main(): Promise<void> {
 
   const volumeTag = requireEnv("VOLUME_TAG");
   const clusterName = requireEnv("CLUSTER_NAME");
-
-  // Register with ECS FIRST, before the (potentially slow) EBS work below.
-  await upsertEcsCluster(clusterName);
+  const slotName = requireEnv("SLOT_NAME");
+  const nodeRole = requireEnv("NODE_ROLE");
+  log(`slot=${slotName} role=${nodeRole}`);
 
   const { instanceId, az, region } = await getInstanceIdentity();
   log(`instance=${instanceId} az=${az} region=${region}`);
@@ -52,9 +66,23 @@ async function main(): Promise<void> {
 
     await updateFstab(uuid, fsType);
     await mountAndPermit();
+    await prepareRoleDirs(nodeRole);
   } finally {
     ec2.destroy(); // close keep-alive sockets so the process can exit promptly
   }
+
+  // Volume is mounted and prepared — only now may the ECS agent come up.
+  await installEcsMountGuard();
+  await upsertEcsConfig({
+    ECS_CLUSTER: clusterName,
+    // Reclaim stopped containers (and the anonymous volumes from the NiFi
+    // image's unmounted VOLUME declarations) after 30m instead of 3h, so a
+    // crash-looping task can't slowly fill the 30 GiB root disk.
+    ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION: "30m",
+    // Tasks get credentials from the task-role endpoint, never IMDS; block the
+    // awsvpc path to the instance profile outright (defense in depth).
+    ECS_AWSVPC_BLOCK_IMDS: "true",
+  });
 
   log(`=== ebs-bootstrap complete: ${nowIso()} ===`);
 }
