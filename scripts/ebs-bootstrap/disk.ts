@@ -4,8 +4,16 @@
 // INVARIANT: this NEVER reformats a device that already carries a filesystem —
 // that is what preserves data across instance replacement in the EBS demo.
 
-import { readFile, mkdir, realpath, readdir } from "node:fs/promises";
-import { DEFAULT_FS_TYPE, FSTAB, INTERVAL_MS, MAX_WAIT_MS, MOUNT_POINT } from "./constants";
+import { readFile, mkdir, realpath, readdir, chown } from "node:fs/promises";
+import {
+  CONTAINER_GID,
+  CONTAINER_UID,
+  DEFAULT_FS_TYPE,
+  FSTAB,
+  INTERVAL_MS,
+  MAX_WAIT_MS,
+  MOUNT_POINT,
+} from "./constants";
 import { atomicWrite, errlog, execFileAsync, execOk, log, runQuiet, sleep, waitBanner } from "./utils";
 
 async function listNvmeDevices(): Promise<string[]> {
@@ -147,4 +155,27 @@ export async function mountAndPermit(): Promise<void> {
   // Sticky bit (1777) rather than 0777: containers share the dir but cannot
   // delete each other's files.
   await execFileAsync("chmod", ["1777", MOUNT_POINT]);
+}
+
+const ROLE_DIRS: Record<string, readonly string[]> = {
+  nifi: ["flowfile", "content", "provenance", "database", "state", "flow"],
+  zookeeper: ["data", "datalog"],
+};
+
+export async function prepareRoleDirs(nodeRole: string): Promise<void> {
+  const dirs = ROLE_DIRS[nodeRole];
+  if (dirs === undefined) {
+    log(`no role directories defined for role '${nodeRole}' — skipping`);
+    return;
+  }
+  for (const name of dirs) {
+    const dir = `${MOUNT_POINT}/${nodeRole}/${name}`;
+    const created = await mkdir(dir, { recursive: true });
+    if (created !== undefined) {
+      await chown(dir, CONTAINER_UID, CONTAINER_GID);
+      log(`created ${dir} (chown ${CONTAINER_UID}:${CONTAINER_GID})`);
+    } else {
+      log(`${dir} exists — preserving ownership and data`);
+    }
+  }
 }

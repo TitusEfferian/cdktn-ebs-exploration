@@ -1,5 +1,9 @@
 # ECS-on-EC2 + EBS persistence demo
 
+> This baseline demo has a bigger sibling now: the same volume-survives-the-
+> instance pattern powering a 3-node Apache NiFi cluster + ZooKeeper ensemble
+> across three AZs — see [README-nifi-cluster.md](README-nifi-cluster.md).
+
 This stack stands up a minimal ECS-on-EC2 setup whose task data lives on a **standalone
 EBS volume**. The point of the demo is to prove that data written into the container's
 `/data` survives the EC2 instance being terminated and replaced by the Auto Scaling Group.

@@ -13,6 +13,7 @@
     "watch": "tsc -w",
     "test": "jest",
     "test:watch": "jest --watch",
+    "verify:cluster": "node scripts/verify-cluster.mjs",
     "upgrade": "npm i cdktn@latest cdktn-cli@latest",
     "upgrade:next": "npm i cdktn@next cdktn-cli@next"
   },
@@ -26,6 +27,8 @@
   },
   "devDependencies": {
     "@aws-sdk/client-ec2": "^3.1091.0",
+    "@aws-sdk/client-ecs": "^3.1091.0",
+    "@aws-sdk/client-servicediscovery": "^3.1091.0",
     "@aws-sdk/ec2-metadata-service": "^3.1091.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.1.1",
