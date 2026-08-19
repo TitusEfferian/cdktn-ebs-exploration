@@ -5,19 +5,11 @@ import { VpcSecurityGroupEgressRule } from "@cdktn/provider-aws/lib/vpc-security
 
 export interface TaskSecurityGroupsProps {
   readonly vpcId: string;
-  // Container-instance SG: source of the SSM port-forward path (the session
-  // terminates on the slot instance, so forwarded traffic to a task ENI
-  // originates from the instance's ENI/SG).
   readonly instanceSecurityGroupId: string;
   readonly clusterName: string;
   readonly tags: Record<string, string>;
 }
 
-// Task-ENI security groups for the awsvpc services. Standalone v2 rule
-// resources (one rule each, referenced_security_group_id for SG-to-SG) are the
-// current provider guidance and avoid dependency cycles between the SGs;
-// Terraform strips AWS's default allow-all egress, so each SG declares its own.
-// DNS to the VPC resolver bypasses SGs entirely — no rules needed for it.
 export class TaskSecurityGroups extends Construct {
   public readonly nifiTaskSgId: string;
   public readonly zkTaskSgId: string;
@@ -38,9 +30,6 @@ export class TaskSecurityGroups extends Construct {
       tags: props.tags,
     });
 
-    // --- NiFi ingress ---------------------------------------------------------
-    // (RAW site-to-site 10000 is disabled in the container wrapper and has no
-    // rule here on purpose.)
     new VpcSecurityGroupIngressRule(this, "nifi_web_from_instances", {
       securityGroupId: nifiSg.id,
       description: "NiFi HTTPS UI/API via SSM port-forward from slot instances",
@@ -49,8 +38,6 @@ export class TaskSecurityGroups extends Construct {
       toPort: 8443,
       referencedSecurityGroupId: props.instanceSecurityGroupId,
     });
-    // Cluster REST request replication travels node-to-node over the WEB port,
-    // in addition to the cluster-protocol and load-balance ports.
     new VpcSecurityGroupIngressRule(this, "nifi_web_self", {
       securityGroupId: nifiSg.id,
       description: "node-to-node REST replication (HTTPS web port)",
@@ -78,11 +65,10 @@ export class TaskSecurityGroups extends Construct {
     new VpcSecurityGroupEgressRule(this, "nifi_egress_all", {
       securityGroupId: nifiSg.id,
       description: "all outbound (ZK 2181, peers, NAT egress)",
-      ipProtocol: "-1", // all protocols => from/to ports must be omitted
+      ipProtocol: "-1",
       cidrIpv4: "0.0.0.0/0",
     });
 
-    // --- ZooKeeper ingress ----------------------------------------------------
     new VpcSecurityGroupIngressRule(this, "zk_client_from_nifi", {
       securityGroupId: zkSg.id,
       description: "NiFi ZK client sessions",
@@ -101,8 +87,6 @@ export class TaskSecurityGroups extends Construct {
     });
     new VpcSecurityGroupIngressRule(this, "zk_quorum_self", {
       securityGroupId: zkSg.id,
-      // EC2 SG-rule descriptions forbid `<` and `>` (allowed set is
-      // a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*), so no "->" arrows here.
       description: "quorum (follower to leader)",
       ipProtocol: "tcp",
       fromPort: 2888,
@@ -123,8 +107,6 @@ export class TaskSecurityGroups extends Construct {
       ipProtocol: "-1",
       cidrIpv4: "0.0.0.0/0",
     });
-    // No rule anywhere for the ZK AdminServer (disabled via env) — port 8080
-    // inside the ZK containers never listens.
 
     this.nifiTaskSgId = nifiSg.id;
     this.zkTaskSgId = zkSg.id;
