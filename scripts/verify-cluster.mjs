@@ -2,7 +2,7 @@ import { ECSClient, DescribeServicesCommand, ListTasksCommand, DescribeTasksComm
 import { EC2Client, DescribeVolumesCommand } from "@aws-sdk/client-ec2";
 import { ServiceDiscoveryClient, DiscoverInstancesCommand } from "@aws-sdk/client-servicediscovery";
 
-// Must match stacks/my-stack.ts.
+// Must match stacks/shared-config.ts (namespaceName still lives in stacks/my-stack.ts).
 const REGION = "ap-northeast-1";
 const CLUSTER = "ecs-ebs-demo";
 const NAMESPACE = "nifi.internal";

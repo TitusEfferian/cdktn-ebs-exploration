@@ -2,6 +2,7 @@ import * as path from "path";
 import { buildSync } from "esbuild";
 import { App } from "cdktn";
 import { MyStack } from "./stacks/my-stack";
+import { SecretsStack } from "./stacks/secrets-stack";
 
 // Bundle the on-instance boot program (scripts/ebs-bootstrap) into a single CJS
 // file BEFORE synth, so the TerraformAsset in Storage can read it. cdktn re-runs
@@ -26,5 +27,6 @@ buildSync({
 });
 
 const app = new App();
+new SecretsStack(app, "ebs_test_secrets");
 new MyStack(app, "ebs_test", { bootstrapBundlePath });
 app.synth();

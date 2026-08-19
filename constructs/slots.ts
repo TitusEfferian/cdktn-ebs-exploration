@@ -40,6 +40,17 @@ export function perSlot<T>(build: (slot: Slot) => T): Record<SlotName, T> {
   return out as Record<SlotName, T>;
 }
 
+export function perRoleSlot<R extends Role, T>(
+  role: R,
+  build: (slot: SlotOfRole<R>) => T,
+): Record<SlotOfRole<R>["name"], T> {
+  const out: Partial<Record<SlotName, T>> = {};
+  for (const s of slotsOfRole(role)) out[s.name] = build(s);
+  // Sound: SlotOfRole<R>["name"] is derived from the same SLOTS entries
+  // slotsOfRole(role) iterates, so every key is populated by construction.
+  return out as Record<SlotOfRole<R>["name"], T>;
+}
+
 export function slotVolumeTag(slot: Slot): string {
   return `${slot.name}-data`;
 }
