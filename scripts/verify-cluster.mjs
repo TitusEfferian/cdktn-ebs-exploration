@@ -1,18 +1,3 @@
-// Workstation-side deployment verifier (read-only). Run after `cdktn deploy`:
-//
-//   node scripts/verify-cluster.mjs        (or: npm run verify:cluster)
-//
-// Checks, one console.table per section:
-//   1. the six slot services are stable (running == desired, single deployment)
-//   2. every task is RUNNING and health-checked, with its awsvpc ENI IP
-//   3. the six slot volumes are in-use and attached
-//   4. Cloud Map resolves every slot name (data-plane DiscoverInstances)
-//
-// Credentials come from the default provider chain (env, SSO, profile...);
-// exits non-zero if any check fails. IAM needed: ecs:DescribeServices,
-// ecs:ListTasks, ecs:DescribeTasks, ec2:DescribeVolumes,
-// servicediscovery:DiscoverInstances.
-
 import { ECSClient, DescribeServicesCommand, ListTasksCommand, DescribeTasksCommand } from "@aws-sdk/client-ecs";
 import { EC2Client, DescribeVolumesCommand } from "@aws-sdk/client-ec2";
 import { ServiceDiscoveryClient, DiscoverInstancesCommand } from "@aws-sdk/client-servicediscovery";
