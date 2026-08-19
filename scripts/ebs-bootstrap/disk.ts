@@ -157,19 +157,11 @@ export async function mountAndPermit(): Promise<void> {
   await execFileAsync("chmod", ["1777", MOUNT_POINT]);
 }
 
-// Per-role bind-mount source directories under the mounted volume. The NiFi
-// image runs as uid 1000 and its entrypoint never chowns bind mounts, so the
-// host must hand ownership over; ZooKeeper's entrypoint chowns for itself, but
-// pre-chowning keeps both roles symmetrical.
 const ROLE_DIRS: Record<string, readonly string[]> = {
   nifi: ["flowfile", "content", "provenance", "database", "state", "flow"],
   zookeeper: ["data", "datalog"],
 };
 
-// mkdir + chown each role directory — chown ONLY when the directory was just
-// created: on a re-attached volume the numeric uid/gid persisted in the ext4
-// metadata, and a recursive re-chown of a populated content repository would
-// needlessly stretch boot time.
 export async function prepareRoleDirs(nodeRole: string): Promise<void> {
   const dirs = ROLE_DIRS[nodeRole];
   if (dirs === undefined) {
@@ -178,8 +170,6 @@ export async function prepareRoleDirs(nodeRole: string): Promise<void> {
   }
   for (const name of dirs) {
     const dir = `${MOUNT_POINT}/${nodeRole}/${name}`;
-    // mkdir{recursive} returns the first path it created, undefined when the
-    // directory already fully existed — exactly the "fresh volume?" signal.
     const created = await mkdir(dir, { recursive: true });
     if (created !== undefined) {
       await chown(dir, CONTAINER_UID, CONTAINER_GID);
