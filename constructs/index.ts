@@ -14,6 +14,7 @@ export {
 export {
   SLOTS,
   perSlot,
+  perRoleSlot,
   slotsOfRole,
   slotVolumeTag,
   slotNodeRole,
@@ -28,7 +29,15 @@ export { SlotStorage, type SlotStorageProps } from "./slot-storage";
 export { SlotNodeIam, type SlotNodeIamProps } from "./slot-node-iam";
 export { TaskSecurityGroups, type TaskSecurityGroupsProps } from "./task-security-groups";
 export { ServiceDiscovery, type ServiceDiscoveryProps } from "./service-discovery";
-export { NifiSecrets, type NifiSecretsProps } from "./nifi-secrets";
+export {
+  NifiSecrets,
+  NifiSecretsLookup,
+  nifiSecretNames,
+  type NifiSecretsProps,
+  type NifiSecretsLookupProps,
+  type NifiSecretRefs,
+  type NifiSecretNames,
+} from "./nifi-secrets";
 export { SlotAsg, type SlotAsgProps } from "./slot-compute";
 export { SlotService, type SlotServiceProps } from "./slot-service";
 export { buildUserDataB64, type UserDataProps } from "./user-data";

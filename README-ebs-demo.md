@@ -61,7 +61,9 @@ or the attach/mount will fail.
 
 ## Stack outputs
 
-After deploy, `cdktn output` prints these keys (used throughout the runbook below):
+After deploy, `cdktn output ebs_test` prints these keys (used throughout the
+runbook below; the app also defines a second stack, `ebs_test_secrets`, which
+holds the NiFi cluster's secrets — see README-nifi-cluster.md):
 
 | Output key      | What it is                                              |
 |-----------------|---------------------------------------------------------|
@@ -76,8 +78,9 @@ After deploy, `cdktn output` prints these keys (used throughout the runbook belo
 ```sh
 # ---- deploy -------------------------------------------------------------
 cd ebs_test
-cdktn deploy                      # review the plan, then approve
-cdktn output                      # note cluster_name, service_name, asg_name, ebs_volume_id
+cdktn deploy ebs_test_secrets     # once, first: ebs_test's plan looks these secrets up
+cdktn deploy ebs_test             # review the plan, then approve
+cdktn output ebs_test             # note cluster_name, service_name, asg_name, ebs_volume_id
 
 # ---- find the task, wait until the ExecuteCommandAgent is RUNNING --------
 # (substitute the <...> placeholders with the values printed by `cdktn output`)
@@ -111,7 +114,7 @@ aws ecs execute-command --cluster <cluster_name> --task <newTaskId> \
 #   inside: cat /data/hello_world.txt      -> still "hello world"  ✅
 
 # ---- teardown -----------------------------------------------------------
-cdktn destroy
+cdktn destroy ebs_test            # the ebs_test_secrets stack survives (see README-nifi-cluster.md)
 ```
 
 ## Notes

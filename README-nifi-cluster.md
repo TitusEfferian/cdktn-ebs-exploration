@@ -52,7 +52,9 @@ The busybox demo from README-ebs-demo.md keeps running unchanged alongside.
   `cdktn` toolchain.
 - Rough cost while running 24/7: ~**$200/month** (3×t4g.medium + 4×t4g.small
   incl. busybox, single NAT gateway, ~110 GiB gp3, logs — Tokyo on-demand,
-  approximate). Tear down with `cdktn destroy` when idle.
+  approximate). Tear down with `cdktn destroy ebs_test` when idle — the seven
+  secrets live in the separate `ebs_test_secrets` stack and survive (see
+  Teardown).
 
 All commands below are PowerShell-first; set once per session:
 
@@ -72,9 +74,15 @@ aws ec2 describe-instance-types --region $REGION --instance-types t4g.small t4g.
 
 ## Deploy and watch the cluster form
 
+Two stacks: `ebs_test_secrets` (the seven secret shells) must exist before
+`ebs_test` will even plan — the cluster looks the secrets up by name.
+Populating the secrets between the two deploys (next section) means NiFi
+comes up clean on first boot instead of crash-looping.
+
 ```powershell
-cdktn deploy        # review the plan, then approve
-cdktn output        # slot_asg_names, slot_volume_ids, ui_port_forward_hint, ...
+cdktn deploy ebs_test_secrets   # 1. secret shells — populate them now (next section)
+cdktn deploy ebs_test           # 2. the cluster — review the plan, then approve
+cdktn output ebs_test           # slot_asg_names, slot_volume_ids, ui_port_forward_hint, ...
 ```
 
 ## Generate TLS material + populate ALL SEVEN secrets (REQUIRED)
@@ -83,12 +91,14 @@ Terraform only creates placeholder-seeded Secrets Manager secrets and ignores
 value changes forever — the real values are yours to set. **NiFi tasks
 crash-loop with a clear log line (`TLS keystore secret not populated...`)
 until the four TLS material secrets hold real base64** — deliberate
-fail-closed. The order is always deploy → populate → roll: `put-secret-value`
-cannot create a secret, the secrets only exist after `cdktn deploy` (and a
-destroy deletes them, recovery window 0), so run the uploads right after
-deploy while NiFi crash-loops harmlessly, then force a new deployment on
-nifi-1/2/3. Step 1 (minting the TLS material) can happen anytime — before or
-after deploy.
+fail-closed. The order is deploy `ebs_test_secrets` → populate → deploy
+`ebs_test`: `put-secret-value` cannot create a secret, the shells only exist
+after `cdktn deploy ebs_test_secrets`, and populating BEFORE the cluster
+deploy means NiFi never crash-loops on first boot (populated later anyway?
+harmless — force a new deployment on nifi-1/2/3, see below). Once populated,
+the values survive `cdktn destroy ebs_test`: a cluster rebuild needs no
+re-populate. Step 1 (minting the TLS material) can happen anytime — before
+or after deploy.
 
 Step 1 — mint the CA + node keystores + shared truststore + admin browser cert
 (outputs land in gitignored `scripts/tls/out`; the keystore password must be
@@ -108,7 +118,8 @@ cd ..\..
 locally? `docker run --rm -it -v "${PWD}\scripts\tls:/tls" -w /tls
 eclipse-temurin:21 bash` from the repo root, then run the scripts inside.)
 
-Step 2 — upload (PowerShell, from the repo root):
+Step 2 — upload (PowerShell, from the repo root; the secret names below are
+also printed by `cdktn output ebs_test_secrets`):
 
 ```powershell
 # the NiFi sensitive-props key (>=12 chars, encrypts sensitive values in flow.json):
@@ -134,7 +145,8 @@ aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/ni
 aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/keystore-nifi-3 --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
 aws secretsmanager get-secret-value --region $REGION --secret-id ecs-ebs-demo/nifi/tls/truststore --query "[starts_with(SecretString,'PLACEHOLDER'),length(SecretString)]" --output text
 
-# secrets are injected at container START only — roll the three NiFi services:
+# ONLY if ebs_test was already deployed when you populated: secrets are
+# injected at container START only — roll the three NiFi services:
 aws ecs update-service --region $REGION --cluster $CLUSTER --service nifi-1 --force-new-deployment | Out-Null
 aws ecs update-service --region $REGION --cluster $CLUSTER --service nifi-2 --force-new-deployment | Out-Null
 aws ecs update-service --region $REGION --cluster $CLUSTER --service nifi-3 --force-new-deployment | Out-Null
@@ -224,7 +236,7 @@ Build something visible first (e.g. a GenerateFlowFile → funnel flow on the
 canvas), then kill the slot that hosts it:
 
 ```powershell
-$ASG = "ecs-ebs-demo-nifi-2"   # stable per-slot names; also in `cdktn output slot_asg_names`
+$ASG = "ecs-ebs-demo-nifi-2"   # stable per-slot names; also in the slot_asg_names output (`cdktn output ebs_test`)
 $VICTIM = aws autoscaling describe-auto-scaling-groups --region $REGION --auto-scaling-group-names $ASG --query "AutoScalingGroups[0].Instances[0].InstanceId" --output text
 $VOL = aws ec2 describe-volumes --region $REGION --filters "Name=tag:Name,Values=nifi-2-data" --query "Volumes[0].VolumeId" --output text
 
@@ -256,7 +268,7 @@ SOA default), which can make peers slow to re-find the returning node. One-time
 tweak per deployment (re-apply after a destroy/recreate):
 
 ```powershell
-$VPC_ID = (cdktn output | Select-String "vpc_id").ToString().Split("=")[-1].Trim()
+$VPC_ID = (cdktn output ebs_test | Select-String "vpc_id").ToString().Split("=")[-1].Trim()
 $ZONE = aws route53 list-hosted-zones-by-vpc --vpc-id $VPC_ID --vpc-region $REGION --query "HostedZoneSummaries[?starts_with(Name, 'nifi.internal')].HostedZoneId | [0]" --output text
 $soa   = aws route53 list-resource-record-sets --hosted-zone-id $ZONE --query "ResourceRecordSets[?Type=='SOA'] | [0]" --output json | ConvertFrom-Json
 $parts = $soa.ResourceRecords[0].Value -split ' '
@@ -285,16 +297,23 @@ rotation.
 ```powershell
 # 1. stop the tasks so every volume detaches (instances release them on scale-in):
 foreach ($s in "nifi-1","nifi-2","nifi-3","zk-1","zk-2","zk-3") { aws ecs update-service --region $REGION --cluster $CLUSTER --service $s --desired-count 0 | Out-Null }
-# 2. destroy
-cdktn destroy
+# 2. destroy the cluster (the secrets stack stays)
+cdktn destroy ebs_test
 ```
 
 Skipping step 1 usually still works — destroying the ASGs terminates the
 instances, which auto-detaches the volumes — but Terraform will sit retrying
 `DeleteVolume` (VolumeInUse) for up to ~10 minutes per volume if a detach is
 slow. There is **no prevent_destroy** on the slot volumes: destroy deletes the
-data, by design, for this demo. The seven Secrets Manager secrets delete
-immediately too (`recovery_window_in_days = 0` — no 30-day "scheduled for
-deletion" state), so their names are instantly reusable on the next deploy;
-re-populate ALL of them after every fresh deploy (the TLS material in
-`scripts/tls/out` can be re-uploaded as-is — no need to re-mint certs).
+data, by design, for this demo. The seven Secrets Manager secrets are NOT
+touched — they live in the separate `ebs_test_secrets` stack, so their
+populated values persist across cluster rebuilds: the next
+`cdktn deploy ebs_test` picks them up as-is, no re-populate needed.
+
+Destroying `ebs_test_secrets` is a separate, rarely-wanted step:
+`cdktn destroy ebs_test_secrets` hard-deletes all seven secrets IMMEDIATELY
+(`recovery_window_in_days = 0` — no 30-day "scheduled for deletion" state, no
+recovery), which also means the names are instantly reusable if you recreate
+the stack. After recreating it, re-populate ALL SEVEN secrets (the TLS
+material in `scripts/tls/out` can be re-uploaded as-is — no need to re-mint
+certs).
